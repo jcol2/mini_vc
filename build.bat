@@ -2,7 +2,7 @@
 
 pushd %~dp0\dst
 
-cl /WX /W3 /Zi /Od /nologo ..\main.c /link ..\msquic.lib /INCREMENTAL:NO
+cl /WX /W4 /wd4100 /wd4057 /Zi /Od /nologo ..\main.c /link ..\msquic.lib /INCREMENTAL:NO
 
 del *.obj
 popd

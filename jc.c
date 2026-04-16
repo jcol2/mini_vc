@@ -443,6 +443,13 @@ struct a8
  size_t Ln;
 };
 
+typedef struct a8_sll_node a8_sll_node;
+struct a8_sll_node
+{
+ a8 A;
+ a8_sll_node *Next;
+};
+
 static a8
 A8(char *S, size_t Ln)
 {
@@ -498,6 +505,39 @@ A8(char *S, size_t Ln)
 //- rjf: singly-linked, singly-headed list helpers
 #define SLLStackPush(f, n) SLLStackPush_N(f, n, Next)
 #define SLLStackPop(f) SLLStackPop_N(f, Next)
+
+static uint16_t
+BswapU16(uint16_t X)
+{
+  uint16_t Ret = (((X & 0xFF00) >> 8) |
+                ((X & 0x00FF) << 8));
+  return Ret;
+}
+
+static uint32_t
+BswapU32(uint32_t X)
+{
+  uint32_t Ret = (((X & 0xFF000000) >> 24) |
+                ((X & 0x00FF0000) >> 8)  |
+                ((X & 0x0000FF00) << 8)  |
+                ((X & 0x000000FF) << 24));
+  return Ret;
+}
+
+static uint64_t
+BswapU64(uint64_t X)
+{
+  // TODO(nick): naive bswap, replace with something that is faster like an intrinsic
+  uint64_t Ret = (((X & 0xFF00000000000000ULL) >> 56) |
+                ((X & 0x00FF000000000000ULL) >> 40) |
+                ((X & 0x0000FF0000000000ULL) >> 24) |
+                ((X & 0x000000FF00000000ULL) >> 8)  |
+                ((X & 0x00000000FF000000ULL) << 8)  |
+                ((X & 0x0000000000FF0000ULL) << 24) |
+                ((X & 0x000000000000FF00ULL) << 40) |
+                ((X & 0x00000000000000FFULL) << 56));
+  return Ret;
+}
 
 //~ rjf: Vector Types
 
@@ -973,6 +1013,25 @@ static uint32_t
 StrStartsWith(char *P1, size_t Ln1, char *P2, size_t Ln2)
 {
  return Ln1 && Ln2 && Ln1 >= Ln2 && !MemCmp(P1, P2, Ln2);
+}
+
+static void
+A8ShlMut(a8 *A, size_t Ln)
+{
+ size_t N = Min(A->Ln, Ln);
+ A->Mem += N;
+ A->Ln -= N;
+}
+
+static uint32_t
+A8EatMut(a8 *A, a8 Prefix)
+{
+ if (StrStartsWith(A->Mem, A->Ln, Prefix.Mem, Prefix.Ln))
+ {
+  A8ShlMut(A, Prefix.Ln);
+  return 1;
+ }
+ return 0;
 }
 
 
