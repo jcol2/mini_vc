@@ -5,6 +5,17 @@
 #include <share.h>
 #endif
 #include "msquic.h"
+
+#include "xxhash.c"
+#undef WIN32
+#define WIN32 1
+#pragma warning(push)
+#pragma warning(disable: 4200)
+#pragma warning(disable: 4334)
+#include "lsqpack.c"
+#pragma warning(pop)
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include "jc.c"
