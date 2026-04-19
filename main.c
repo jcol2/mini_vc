@@ -50,7 +50,7 @@ enum
  H3StreamPush = 0x01,
  H3StreamQpackEncoder = 0x02,
  H3StreamQpackDecoder = 0x03,
- // todo maybe add 0x41 bidi signal here
+ H3StreamBidiWebtransportStream = 0x41,
  H3StreamUniWebtransportStream = 0x54,
 };
 
@@ -169,9 +169,9 @@ struct varint_pair_decoder
 struct wt_stream
 {
  uint64_t Id;
- h3_stream_kind Type;
  uint32_t IsSession;
 
+ varint_pair_decoder StreamHeader;
  varint_pair_decoder CurFrameHeader;
  size_t HeaderFrameOffset;
  varint_pair_decoder CurSetting;
@@ -574,6 +574,7 @@ ServerControlStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
      if (Stream->Con->PeerSettings.Recvd || !FrameLn)
      {
       ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrGeneralProtocolError);
+      break;
      }
      else
      {
@@ -584,6 +585,7 @@ ServerControlStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        Stream->HeaderFrameOffset += Offset - OgOffset;
        if (Stream->CurSetting.Success)
        {
+        Stream->CurSetting = (varint_pair_decoder){0};
         uint64_t SettingType = Stream->CurSetting.Val1;
         uint64_t SettingVal = Stream->CurSetting.Val2;
         H3SettingsInsert(&Stream->Con->PeerSettings, SettingType, SettingVal);
@@ -643,6 +645,7 @@ ServerControlStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
          {
           ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrGeneralProtocolError);
          }
+         break;
         }
        }
        else
@@ -713,47 +716,93 @@ ServerUniStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
  wt_stream *Stream = (wt_stream *)Ctx;
  QUIC_API_TABLE *MsQuic = Stream->Con->Srv->MsQuic;
- QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers;
- if (!(Event->RECEIVE.TotalBufferLength && Buf->Length))
- {
-  return QUIC_STATUS_SUCCESS;
- }
 
- if (Stream->Id == UINT64_MAX)
+ if (Event->Type == QUIC_STREAM_EVENT_RECEIVE)
  {
-  size_t Offset = 0;
-  if (!WtVarIntDecode(Buf->Buffer, Buf->Length, &Offset, &Stream->Type))
+  if (!Event->RECEIVE.TotalBufferLength)
   {
-   // todo local buffering
-   ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrGeneralProtocolError);
    return QUIC_STATUS_SUCCESS;
   }
-  Buf->Buffer += (uint32_t)Offset;
-  Buf->Length -= (uint32_t)Offset;
-  uint32_t StreamIdSize = sizeof(Stream->Id);
-  if (QUIC_FAILED(MsQuic->GetParam(QStream, QUIC_PARAM_STREAM_ID, &StreamIdSize, &Stream->Id)))
+
+  if (Stream->Id == UINT64_MAX)
   {
-   ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrInternalError);
-   return QUIC_STATUS_SUCCESS;
+   uint32_t GotStreamHeader = 0;
+   for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
+   {
+    QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
+    size_t Offset = 0;
+    WtVarintPairDecoderDecode(Buf->Buffer, Buf->Length, &Offset, &Stream->StreamHeader);
+    varint_pair_decoder *Header = &Stream->StreamHeader;
+
+    // some headers have a 2 varint header, others have a 1 varint header
+    // in the "normal" 1 varint case, we should only trim 1 byte and ignore the second varint
+    uint32_t GotH3Uni = (Header->Got1 && (Header->Val1 == H3StreamControl || Header->Val1 == H3StreamQpackEncoder || Header->Val1 == H3StreamQpackEncoder));
+    Buf->Buffer += GotH3Uni ? 1 : (uint32_t)Offset;
+    Buf->Length -= GotH3Uni ? 1 : (uint32_t)Offset;
+
+    GotStreamHeader = (Header->Success || GotH3Uni);
+    if (GotStreamHeader)
+    {
+     break;
+    }
+   }
+
+   varint_pair_decoder *Header = &Stream->StreamHeader;
+   if (GotStreamHeader)
+   {
+    uint32_t StreamIdSize = sizeof(Stream->Id);
+    if (QUIC_FAILED(MsQuic->GetParam(QStream, QUIC_PARAM_STREAM_ID, &StreamIdSize, &Stream->Id)))
+    {
+     ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrInternalError);
+     return QUIC_STATUS_SUCCESS;
+    }
+   }
+   else
+   {
+    return QUIC_STATUS_SUCCESS;
+   }
+  }
+  // By this point, stream header and stream id should be known
+
+  size_t StreamType = Stream->StreamHeader.Val1;
+  switch (StreamType)
+  {
+   case H3StreamControl:
+   {
+    return ServerControlStreamCallback(QStream, Ctx, Event);
+   } break;
+   case H3StreamQpackEncoder:
+   {
+    return QUIC_STATUS_SUCCESS;
+   } break;
+   case H3StreamQpackDecoder:
+   {
+    return QUIC_STATUS_SUCCESS;
+   } break;
+   case H3StreamUniWebtransportStream:
+   {
+    return ServerUniWtStreamCallback(QStream, Ctx, Event);
+   } break;
+   default:
+   {
+    ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrGeneralProtocolError);
+    return QUIC_STATUS_SUCCESS;
+   } break;
   }
  }
+ return QUIC_STATUS_SUCCESS;
+}
 
- switch (Stream->Type)
- {
-  case H3StreamControl:
-  {
-   return ServerControlStreamCallback(QStream, Ctx, Event);
-  } break;
-  case H3StreamUniWebtransportStream:
-  {
-   return ServerUniWtStreamCallback(QStream, Ctx, Event);
-  } break;
-  default:
-  {
-   ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrGeneralProtocolError);
-   return QUIC_STATUS_SUCCESS;
-  } break;
- }
+static QUIC_STATUS
+ServerBidiWtStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
+{
+ return QUIC_STATUS_SUCCESS;
+}
+
+static QUIC_STATUS
+ServerBidiH3StreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
+{
+ return QUIC_STATUS_SUCCESS;
 }
 
 static QUIC_STATUS
@@ -761,68 +810,46 @@ ServerBidiStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
  wt_stream *Stream = (wt_stream *)Ctx;
  QUIC_API_TABLE *MsQuic = Stream->Con->Srv->MsQuic;
- printf("Bidi stream\n");
-
  switch (Event->Type)
  {
   case QUIC_STREAM_EVENT_RECEIVE:
   {
    printf("Bidi stream RECEIVE\n");
-
-   for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
+   if (!(Event->RECEIVE.TotalBufferLength && Event->RECEIVE.BufferCount))
    {
-    QUIC_BUFFER Buf = Event->RECEIVE.Buffers[I];
-    a8 View = A8(Buf.Buffer, Buf.Length);
-    if (Stream->Id == UINT64_MAX)
+    return QUIC_STATUS_SUCCESS;
+   }
+
+   if (!Stream->StreamHeader.Success)
+   {
+    for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
     {
-     uint32_t StreamIdSize = sizeof(Stream->Id);
-     if (QUIC_FAILED(MsQuic->GetParam(QStream, QUIC_PARAM_STREAM_ID, &StreamIdSize, &Stream->Id)))
-     {
-      StreamSendShutdown(MsQuic, QStream, H3ErrInternalError);
-      return QUIC_STATUS_SUCCESS;
-     }
-
-     // frame
-     uint64_t FrameType = 0;
-     uint64_t Something = 0;
-     if (!(A8EatVarInt(&View, &FrameType) && A8EatVarInt(&View, &Something)))
-     {
-      StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
-      return QUIC_STATUS_SUCCESS;
-     }
-
-     switch (FrameType)
-     {
-      case H3FrameHeaders:
-      {
-       uint64_t FrameLn = Something;
-       if (FrameLn > View.Ln)
-       {
-        printf("Got bifurcated frame RIP\n");
-        StreamSendShutdown(MsQuic, QStream, H3ErrInternalError);
-        return QUIC_STATUS_SUCCESS;
-       }
-
-       
-      } break;
-      case H3FrameBidirWebtransportStream:
-      {
-       // todo validate that there is an associated connect stream
-       // uint64_t SessionId = Something;
-
-      } break;
-      default:
-      {
-       printf("Got something weird.\n");
-       StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
-       return QUIC_STATUS_SUCCESS;
-      } break;
-     }
+     QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
+     size_t Offset = 0;
+     WtVarintPairDecoderDecode(Buf->Buffer, Buf->Length, &Offset, &Stream->StreamHeader);
+     Buf->Buffer += (uint32_t)Offset;
+     Buf->Length -= (uint32_t)Offset;
+    }
+   }
+   if (Stream->StreamHeader.Success)
+   {
+    if (Stream->StreamHeader.Val1 == H3FrameHeaders)
+    {
+     return ServerBidiH3StreamCallback(QStream, Ctx, Event);
+    }
+    else if (Stream->StreamHeader.Val1 == H3StreamBidiWebtransportStream)
+    {
+     return ServerBidiWtStreamCallback(QStream, Ctx, Event);
     }
     else
     {
-     printf("Unimpl...\n");
+     StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
+     return QUIC_STATUS_SUCCESS;
     }
+   }
+   else
+   {
+    return QUIC_STATUS_SUCCESS;
    }
   } break;
   case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
