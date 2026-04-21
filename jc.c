@@ -506,6 +506,12 @@ A8(char *S, size_t Ln)
 #define SLLStackPush(f, n) SLLStackPush_N(f, n, Next)
 #define SLLStackPop(f) SLLStackPop_N(f, Next)
 
+// memory ops
+#define MemoryZero(s,z)       memset((s),0,(z))
+#define MemoryZeroStruct(s)   MemoryZero((s),sizeof(*(s)))
+#define MemoryZeroArray(a)    MemoryZero((a),sizeof(a))
+#define MemoryZeroTyped(m,c)  MemoryZero((m),sizeof(*(m))*(c))
+
 static uint16_t
 BswapU16(uint16_t X)
 {
@@ -1013,6 +1019,12 @@ static uint32_t
 StrStartsWith(char *P1, size_t Ln1, char *P2, size_t Ln2)
 {
  return Ln1 && Ln2 && Ln1 >= Ln2 && !MemCmp(P1, P2, Ln2);
+}
+
+static uint32_t
+A8Eq(a8 A, a8 B)
+{
+ return StrEq(A.Mem, A.Ln, B.Mem, B.Ln);
 }
 
 static void

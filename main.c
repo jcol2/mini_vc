@@ -14,7 +14,14 @@
 #pragma warning(disable: 4334)
 #include "lsqpack.c"
 #pragma warning(pop)
-
+typedef enum lsqpack_read_header_status lsqpack_read_header_status;
+typedef enum lsqpack_dec_opts lsqpack_dec_opts;
+typedef enum lsqpack_enc_status lsqpack_enc_status;
+typedef enum lsqpack_enc_header_flags lsqpack_enc_header_flags;
+typedef struct lsqpack_dec lsqpack_dec;
+typedef struct lsqpack_enc lsqpack_enc;
+typedef struct lsqpack_dec_hset_if lsqpack_dec_hset_if;
+typedef struct lsxpack_header lsxpack_header;
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,7 +31,7 @@ typedef int32_t h3_err_kind;
 enum
 {
  H3ErrNoError = 0x0100,
- H3ErrGeneralProtocolError= 0x0101,
+ H3ErrGeneralProtocolError = 0x0101,
  H3ErrInternalError = 0x0102,
  H3ErrStreamCreationError= 0x0103,
  H3ErrClosedCriticalStream = 0x0104,
@@ -94,6 +101,32 @@ enum
  WtCapsuleDataBlocked = 0x190B4D41,
 };
 
+typedef uint32_t h3_protocol_kind;
+enum
+{
+ H3ProtocolUnknown,
+ H3ProtocolWebtransport,
+};
+
+typedef uint32_t h3_method_kind;
+enum
+{
+ H3MethodUnknown,
+ H3MethodGet,
+ H3MethodPost,
+ H3MethodPut,
+ H3MethodPatch,
+ H3MethodDelete,
+ H3MethodConnect,
+};
+
+typedef uint32_t h3_scheme_kind;
+enum
+{
+ H3SchemeUnknown,
+ H3SchemeHttps,
+};
+
 typedef struct h3_settings h3_settings;
 struct h3_settings
 {
@@ -108,6 +141,29 @@ struct h3_settings
 
  uint32_t Sent;
  uint32_t Recvd;
+};
+
+typedef struct h3_enc_header h3_enc_header;
+struct h3_enc_header
+{
+ char Mem[512];
+ lsxpack_header Header;
+};
+
+typedef struct h3_header h3_header;
+struct h3_header
+{
+ a8 Name;
+ a8 Val;
+};
+
+typedef struct h3_header_frame h3_header_frame;
+struct h3_header_frame
+{
+ uint8_t FrameHeaderBuffer[16];
+ uint8_t PrefixBuffer[32];
+ uint8_t HeadersBuffer[256];
+ QUIC_BUFFER Buffers[3];
 };
 
 #define WtStreamIsUni(Id) ((Id) & 0x02)
@@ -125,22 +181,52 @@ struct wt_server
  HQUIC Configuration;
 
  wt_con *First;
+ wt_con *Last;
  wt_con *Free;
+};
+
+typedef struct wt_req wt_req;
+struct wt_req
+{
+ char Dat[1028];
+ a8 View;
+
+ h3_protocol_kind Protocol;
+ h3_method_kind Method;
+ h3_scheme_kind Scheme;
+ a8 Authority;
+ a8 Path;
+ a8 Origin;
+
+ wt_req *Next;
+
+ uint32_t Fail;
 };
 
 struct wt_con
 {
+ ar *Ar;
  h3_settings PeerSettings;
  HQUIC ControlStream;
  HQUIC QCon;
+ wt_stream *SessionStream;
+ lsqpack_dec Dec;
+ lsqpack_enc Enc;
 
  wt_server *Srv;
  wt_con *Next;
+ wt_con *Prev;
  wt_stream *FirstStream;
+ wt_stream *LastStream;
  wt_stream *FreeStream;
+ wt_req *FreeReq;
 
+ // for sending settings response
  char SettingsMsg[64];
  QUIC_BUFFER QBuf;
+
+ // for sending connect response
+ h3_header_frame ResHeaderFrame;
 };
 
 typedef struct varint_decoder varint_decoder;
@@ -169,18 +255,191 @@ struct varint_pair_decoder
 struct wt_stream
 {
  uint64_t Id;
- uint32_t IsSession;
 
  varint_pair_decoder StreamHeader;
  varint_pair_decoder CurFrameHeader;
- size_t HeaderFrameOffset;
+ size_t FrameOffset;
  varint_pair_decoder CurSetting;
+ 
+ lsxpack_header CurDecodeHeader;
+ char DecodeBuffer[4096];
 
  // todo track if stream closed?
 
  wt_con *Con;
  wt_stream *Next;
+ wt_stream *Prev;
+ wt_req *Req;
 };
+
+
+
+// qpack
+
+
+
+static uint32_t
+A8WriteA8(a8 *Dst, a8 Src)
+{
+ if (Dst->Ln >= Src.Ln)
+ {
+  memcpy(Dst->Mem, Src.Mem, Src.Ln);
+  A8ShlMut(Dst, Src.Ln);
+  return 1;
+ }
+ return 0;
+}
+
+static void
+QpackUnblocked(void *Ctx)
+{
+ (void)Ctx;
+}
+
+static lsxpack_header *
+QpackPrepareDecode(void *Ctx, lsxpack_header *Header, size_t Space)
+{
+ wt_stream *Stream = Ctx;
+ if (Space > sizeof(Stream->DecodeBuffer))
+ {
+  printf("Header too big, %zu\n", Space);
+  return 0;
+ }
+
+ if (Header)
+ {
+  Header->buf = Stream->DecodeBuffer;
+  Header->val_len = (lsxpack_strlen_t)Space;
+ }
+ else
+ {
+  Header = &Stream->CurDecodeHeader;
+  lsxpack_header_prepare_decode(Header, Stream->DecodeBuffer, 0, Space);
+ }
+
+ return Header;
+}
+
+static int
+QpackProcessHeader(void *Ctx, lsxpack_header *Header)
+{
+ wt_stream *Stream = Ctx;
+ a8 Name = A8(Header->buf + Header->name_offset, Header->name_len);
+ a8 Val = A8(Header->buf + Header->val_offset, Header->val_len);
+
+ if (!Stream->Req)
+ {
+  Stream->Req = Stream->Con->FreeReq;
+  if (Stream->Req)
+  {
+   SLLStackPop(Stream->Con->FreeReq);
+  }
+  else
+  {
+   Stream->Req = ArPush(Stream->Con->Ar, wt_req, 1);
+  }
+  Stream->Req->View = A8(Stream->Req->Dat, sizeof(Stream->Req->Dat));
+ }
+ wt_req *Req = Stream->Req;
+
+ if (A8Eq(Name, CStr(":method")))
+ {
+  if (A8Eq(Val, CStr("GET")))
+  {
+   Req->Method = H3MethodGet;
+  }
+  else if (A8Eq(Val, CStr("POST")))
+  {
+   Req->Method = H3MethodPost;
+  }
+  else if (A8Eq(Val, CStr("PUT")))
+  {
+   Req->Method = H3MethodPut;
+  }
+  else if (A8Eq(Val, CStr("PATCH")))
+  {
+   Req->Method = H3MethodPatch;
+  }
+  else if (A8Eq(Val, CStr("DELETE")))
+  {
+   Req->Method = H3MethodDelete;
+  }
+  else if (A8Eq(Val, CStr("CONNECT")))
+  {
+   Req->Method = H3MethodConnect;
+  }
+ }
+ else if (A8Eq(Name, CStr(":scheme")))
+ {
+  if (A8Eq(Val, CStr("https")))
+  {
+   Req->Scheme = H3SchemeHttps;
+  }
+ }
+ else if (A8Eq(Name, CStr(":authority")))
+ {
+  char *Mem = Req->View.Mem;
+  if (A8WriteA8(&Req->View, Val))
+  {
+   Req->Authority = A8(Mem, Val.Ln);
+  }
+  else
+  {
+   printf("Ran out of header space\n");
+   Req->Fail = 1;
+  }
+ }
+ else if (A8Eq(Name, CStr(":path")))
+ {
+  char *Mem = Req->View.Mem;
+  if (A8WriteA8(&Req->View, Val))
+  {
+   Req->Path = A8(Mem, Val.Ln);
+  }
+  else
+  {
+   printf("Ran out of header space\n");
+   Req->Fail = 1;
+  }
+ }
+ else if (A8Eq(Name, CStr(":protocol")))
+ {
+  if (A8Eq(Val, CStr("webtransport-h3")))
+  {
+   Req->Protocol = H3ProtocolWebtransport;
+  }
+  else
+  {
+   // todo for some reason edge (chromium) sends webtransport567
+   a8 WtStr = CStr("webtransport");
+   if (StrStartsWith(Val.Mem, Val.Ln, WtStr.Mem, WtStr.Ln))
+   {
+    Req->Protocol = H3ProtocolWebtransport;
+   }
+  }
+ }
+ else if (A8Eq(Name, CStr("origin")))
+ {
+  char *Mem = Req->View.Mem;
+  if (A8WriteA8(&Req->View, Val))
+  {
+   Req->Origin = A8(Mem, Val.Ln);
+  }
+  else
+  {
+   printf("Ran out of header space\n");
+   Req->Fail = 1;
+  }
+ }
+
+ return 0;
+}
+
+
+
+// 
+
+
 
 uint8_t
 DecodeHexChar(char c)
@@ -308,15 +567,66 @@ A8WriteVarInt(a8 *A, uint64_t N)
 }
 
 static uint32_t
-A8WriteA8(a8 *Dst, a8 Src)
+H3HeaderEncode(lsqpack_enc *Enc, uint64_t StreamId, h3_header *Headers, size_t HeadersLn, h3_header_frame *Out)
 {
- if (Dst->Ln >= Src.Ln)
+ if (StreamId == UINT64_MAX)
  {
-  memcpy(Dst->Mem, Src.Mem, Src.Ln);
-  A8ShlMut(Dst, Src.Ln);
-  return 1;
+  return 0;
  }
- return 0;
+
+ if (lsqpack_enc_start_header(Enc, StreamId, 0))
+ {
+  return 0;
+ }
+ size_t EncOffset = 0;
+ size_t HeaderOffset = 0;
+ for (size_t I = 0; I < HeadersLn; ++I)
+ {
+  h3_header Header = Headers[I];
+  h3_enc_header EncHeader = {0};
+  {
+   EncHeader.Header.buf = EncHeader.Mem;
+   EncHeader.Header.name_offset = 0;
+   EncHeader.Header.name_len = (lsxpack_strlen_t)Header.Name.Ln;
+   EncHeader.Header.val_offset = (lsxpack_strlen_t)Header.Name.Ln;
+   EncHeader.Header.val_len = (lsxpack_strlen_t)Header.Val.Ln;
+   memcpy(EncHeader.Mem, Header.Name.Mem, Header.Name.Ln);
+   memcpy(EncHeader.Mem + Header.Name.Ln, Header.Val.Mem, Header.Val.Ln);
+  }
+
+  // todo EncStreamMem should go in the stream object, reference msh3
+  char EncStreamMem[256] = {0};
+  size_t EncStreamLn = sizeof(EncStreamMem) - EncOffset;
+  size_t HeaderLn = sizeof(Out->HeadersBuffer) - HeaderOffset;
+  lsqpack_enc_status Res = lsqpack_enc_encode(Enc, EncStreamMem + EncOffset, &EncStreamLn, Out->HeadersBuffer + HeaderOffset, &HeaderLn, &EncHeader.Header, 0);
+  if (Res != LQES_OK)
+  {
+   return 0;
+  }
+  EncOffset += EncStreamLn;
+  HeaderOffset += HeaderLn;
+ }
+ Out->Buffers[2] = (QUIC_BUFFER){.Buffer = Out->HeadersBuffer, .Length = (uint32_t)HeaderOffset};
+
+ lsqpack_enc_header_flags Flags = 0;
+ ssize_t PrefixLn = lsqpack_enc_end_header(Enc, (char *)&Out->PrefixBuffer, sizeof(Out->PrefixBuffer), &Flags);
+ if (PrefixLn < 0)
+ {
+  return 0;
+ }
+ Out->Buffers[1] = (QUIC_BUFFER){.Buffer = Out->PrefixBuffer, .Length = (uint32_t)PrefixLn};
+ // todo send enc output, see msh3
+
+ {
+  a8 FrameHeaderView = A8(Out->FrameHeaderBuffer, sizeof(Out->FrameHeaderBuffer));
+  size_t HeaderFrameLn = PrefixLn + HeaderOffset;
+  A8WriteVarInt(&FrameHeaderView, H3FrameHeaders);
+  A8WriteVarInt(&FrameHeaderView, HeaderFrameLn);
+
+  Out->Buffers[0] = (QUIC_BUFFER){.Buffer = Out->FrameHeaderBuffer, .Length = sizeof(Out->FrameHeaderBuffer) - (uint32_t)FrameHeaderView.Ln};
+ }
+
+ return 1;
 }
 
 // // The length of buffer sent over the streams in the protocol.
@@ -534,6 +844,56 @@ WtVarintPairDecoderDecode(char *ArrMem, size_t ArrLn, size_t *Offset, varint_pai
  return Cache->Success;
 }
 
+static uint32_t
+H3SettingsSer(h3_settings *Settings, char *Mem, size_t Ln, a8 *Out)
+{
+ uint32_t Ret = 1;
+ a8 A = A8(Mem, Ln);
+ a8 AView = A;
+
+ char TmpArr[256] = {0};
+ a8 TmpSettings = A8(TmpArr, sizeof(TmpArr));
+ a8 TmpSettingsView = TmpSettings;
+
+ A8WriteVarInt(&TmpSettingsView, H3SettingMaxFieldSectionSize);
+ A8WriteVarInt(&TmpSettingsView, Settings->MaxFieldSectionSize);
+ A8WriteVarInt(&TmpSettingsView, H3SettingQpackMaxTableCapacity);
+ A8WriteVarInt(&TmpSettingsView, Settings->QpackMaxTableLn);
+ A8WriteVarInt(&TmpSettingsView, H3SettingQpackBlockedStreams);
+ A8WriteVarInt(&TmpSettingsView, Settings->QpackBlockedStreams);
+ A8WriteVarInt(&TmpSettingsView, H3SettingWebtransportMaxSessions);
+ A8WriteVarInt(&TmpSettingsView, Settings->WtMaxSessions);
+ A8WriteVarInt(&TmpSettingsView, H3SettingH3Datagram);
+ A8WriteVarInt(&TmpSettingsView, Settings->DatagramOn);
+ A8WriteVarInt(&TmpSettingsView, H3SettingEnableConnectProtocol);
+ A8WriteVarInt(&TmpSettingsView, Settings->ConnectProtocolOn);
+ A8WriteVarInt(&TmpSettingsView, H3SettingEnableWebtransport);
+ A8WriteVarInt(&TmpSettingsView, Settings->WebtransportOn);
+
+ a8 FinalTmpSettings = A8(TmpSettings.Mem, TmpSettings.Ln - TmpSettingsView.Ln);
+ 
+ Ret &= A8WriteVarInt(&AView, H3StreamControl);
+ Ret &= A8WriteVarInt(&AView, H3FrameSettings);
+ Ret &= A8WriteVarInt(&AView, FinalTmpSettings.Ln);
+ Ret &= A8WriteA8(&AView, FinalTmpSettings);
+
+ Out->Mem = A.Mem;
+ Out->Ln = A.Ln - AView.Ln;
+ return Ret;
+}
+
+static uint32_t
+ReqConnectValidate(wt_req *Req)
+{
+ return !Req->Fail
+   && Req->Method == H3MethodConnect
+   && Req->Protocol == H3ProtocolWebtransport
+   && Req->Scheme == H3SchemeHttps
+   && Req->Authority.Ln
+   && Req->Path.Ln
+   && Req->Origin.Ln;
+}
+
 static QUIC_STATUS
 ServerControlStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
@@ -557,17 +917,17 @@ ServerControlStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 
   for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
   {
-   const QUIC_BUFFER *Buffer = Event->RECEIVE.Buffers + I;
+   QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
    size_t Offset = 0;
-   while (Offset < Buffer->Length)
+   while (Offset < Buf->Length)
    {
-    if (!WtVarintPairDecoderDecode(Buffer->Buffer, Buffer->Length, &Offset, &Stream->CurFrameHeader))
+    if (!WtVarintPairDecoderDecode(Buf->Buffer, Buf->Length, &Offset, &Stream->CurFrameHeader))
     {
      break;
     }
     size_t FrameType = Stream->CurFrameHeader.Val1;
     size_t FrameLn = Stream->CurFrameHeader.Val2;
-    size_t FrameLnAvail = Min(Buffer->Length - Offset, FrameLn);
+    size_t Avail = Min(Buf->Length - Offset, FrameLn);
 
     if (FrameType == H3FrameSettings)
     {
@@ -576,96 +936,76 @@ ServerControlStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
       ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrGeneralProtocolError);
       break;
      }
-     else
+     if (Avail)
      {
-      if (FrameLnAvail)
+      size_t OgOffset = Offset;
+      WtVarintPairDecoderDecode(Buf->Buffer, Offset + Avail, &Offset, &Stream->CurSetting);
+      Stream->FrameOffset += Offset - OgOffset;
+      if (Stream->CurSetting.Success)
       {
-       size_t OgOffset = Offset;
-       WtVarintPairDecoderDecode(Buffer->Buffer, Buffer->Length, &Offset, &Stream->CurSetting);
-       Stream->HeaderFrameOffset += Offset - OgOffset;
-       if (Stream->CurSetting.Success)
+       Stream->CurSetting = (varint_pair_decoder){0};
+       uint64_t SettingType = Stream->CurSetting.Val1;
+       uint64_t SettingVal = Stream->CurSetting.Val2;
+       H3SettingsInsert(&Stream->Con->PeerSettings, SettingType, SettingVal);
+       if (Stream->FrameOffset < FrameLn)
        {
-        Stream->CurSetting = (varint_pair_decoder){0};
-        uint64_t SettingType = Stream->CurSetting.Val1;
-        uint64_t SettingVal = Stream->CurSetting.Val2;
-        H3SettingsInsert(&Stream->Con->PeerSettings, SettingType, SettingVal);
-        if (Stream->HeaderFrameOffset < FrameLn)
-        {
-         continue;
-        }
-        else
-        {
-         Stream->Con->PeerSettings.Recvd = 1;
-         // todo validate recvd settings
-         h3_settings LocalSettings = {
-          .MaxFieldSectionSize = 65536,
-          .QpackMaxTableLn = 0,
-          .QpackBlockedStreams = 0,
-          .WtMaxSessions = 16,
-          .DatagramOn = 1,
-          .ConnectProtocolOn = 1,
-          .WebtransportOn = 1,
-         };
-
-         QUIC_BUFFER *SendBuf = &Stream->Con->QBuf;
-         a8 A = A8(Stream->Con->SettingsMsg, sizeof(Stream->Con->SettingsMsg));
-         a8 AView = A;
-
-         char TmpArr[256] = {0};
-         a8 TmpSettings = A8(TmpArr, sizeof(TmpArr));
-         a8 TmpSettingsView = TmpSettings;
-
-         A8WriteVarInt(&TmpSettingsView, H3SettingMaxFieldSectionSize);
-         A8WriteVarInt(&TmpSettingsView, LocalSettings.MaxFieldSectionSize);
-         A8WriteVarInt(&TmpSettingsView, H3SettingQpackMaxTableCapacity);
-         A8WriteVarInt(&TmpSettingsView, LocalSettings.QpackMaxTableLn);
-         A8WriteVarInt(&TmpSettingsView, H3SettingQpackBlockedStreams);
-         A8WriteVarInt(&TmpSettingsView, LocalSettings.QpackBlockedStreams);
-         A8WriteVarInt(&TmpSettingsView, H3SettingWebtransportMaxSessions);
-         A8WriteVarInt(&TmpSettingsView, LocalSettings.WtMaxSessions);
-         A8WriteVarInt(&TmpSettingsView, H3SettingH3Datagram);
-         A8WriteVarInt(&TmpSettingsView, LocalSettings.DatagramOn);
-         A8WriteVarInt(&TmpSettingsView, H3SettingEnableConnectProtocol);
-         A8WriteVarInt(&TmpSettingsView, LocalSettings.ConnectProtocolOn);
-         A8WriteVarInt(&TmpSettingsView, H3SettingEnableWebtransport);
-         A8WriteVarInt(&TmpSettingsView, LocalSettings.WebtransportOn);
-
-         a8 FinalTmpSettings = A8(TmpSettings.Mem, TmpSettings.Ln - TmpSettingsView.Ln);
-         
-         A8WriteVarInt(&AView, H3StreamControl);
-         A8WriteVarInt(&AView, H3FrameSettings);
-         A8WriteVarInt(&AView, FinalTmpSettings.Ln);
-         A8WriteA8(&AView, FinalTmpSettings);
-
-         SendBuf->Buffer = A.Mem;
-         SendBuf->Length = (uint32_t)(A.Ln - AView.Ln);
-
-         printf("Sending settings\n");
-         if (QUIC_FAILED(MsQuic->StreamSend(Stream->Con->ControlStream, SendBuf, 1, QUIC_SEND_FLAG_NONE, 0)))
-         {
-          ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrGeneralProtocolError);
-         }
-         break;
-        }
+        continue;
        }
-       else
+       Stream->FrameOffset = 0;
+       Stream->CurFrameHeader = (varint_pair_decoder){0};
+       Stream->Con->PeerSettings.Recvd = 1;
+       // todo validate recvd settings
+
+       h3_settings LocalSettings = {
+        .MaxFieldSectionSize = 65536,
+        .QpackMaxTableLn = 0,
+        .QpackBlockedStreams = 0,
+        .WtMaxSessions = 16,
+        .DatagramOn = 1,
+        .ConnectProtocolOn = 1,
+        .WebtransportOn = 1,
+       };
+       QUIC_BUFFER *SendBuf = &Stream->Con->QBuf;
+       a8 Msg = {0};
+       if (!H3SettingsSer(&LocalSettings, Stream->Con->SettingsMsg, sizeof(Stream->Con->SettingsMsg), &Msg))
        {
+        ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrInternalError);
+        break;
+       }
+       SendBuf->Buffer = Msg.Mem;
+       SendBuf->Length = (uint32_t)Msg.Ln;
+       printf("Sending settings\n");
+
+       if (QUIC_FAILED(MsQuic->StreamSend(Stream->Con->ControlStream, SendBuf, 1, QUIC_SEND_FLAG_NONE, 0)))
+       {
+        ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrGeneralProtocolError);
+        break;
+       }
+
+       // in the future the negotiated qpack params will be passed in
+       if (lsqpack_enc_init(&Stream->Con->Enc, 0, 0, 0, 0, LSQPACK_ENC_OPT_STAGE_2, 0, 0))
+       {
+        ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrInternalError);
         break;
        }
       }
-      else
+      else if (Avail >= (FrameLn - Stream->FrameOffset))
       {
+       // this should've succeeded, must be bad req data
+       ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrGeneralProtocolError);
        break;
       }
      }
     }
     else if (FrameType == H3FrameGoaway)
     {
+     MemoryZeroStruct(&Stream->CurFrameHeader);
      ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrNoError);
     }
     else
     {
-     if (Stream->Con->PeerSettings.Recvd)
+     MemoryZeroStruct(&Stream->CurFrameHeader);
+     if (!Stream->Con->PeerSettings.Recvd)
      {
       ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrGeneralProtocolError);
      }
@@ -794,14 +1134,122 @@ ServerUniStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 }
 
 static QUIC_STATUS
-ServerBidiWtStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
+ServerBidiWtReceive(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
  return QUIC_STATUS_SUCCESS;
 }
 
+// todo proper sessionstream ptr free
+/*
+frameleft = frameln - frameoffset
+bufleft = bufln - bufoffset
+avail = min(frameleft, bufleft)
+
+avail >= frameleft   this should succeed, but if fail then bad req
+avail < frameleft    can succeed or fail, iteratively try again
+*/
 static QUIC_STATUS
-ServerBidiH3StreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
+ServerBidiH3Receive(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
+ wt_stream *Stream = (wt_stream *)Ctx;
+ QUIC_API_TABLE *MsQuic = Stream->Con->Srv->MsQuic;
+
+ for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
+ {
+  QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
+  size_t Offset = 0;
+  while (Offset < Buf->Length)
+  {
+   if (!WtVarintPairDecoderDecode(Buf->Buffer, Buf->Length, &Offset, &Stream->CurFrameHeader))
+   {
+    break;
+   }
+   size_t FrameType = Stream->CurFrameHeader.Val1;
+   size_t FrameLn = Stream->CurFrameHeader.Val2;
+   size_t Avail = Min(Buf->Length - Offset, FrameLn - Stream->FrameOffset);
+
+   switch (FrameType)
+   {
+    case H3FrameHeaders:
+    {
+     lsqpack_read_header_status Res;
+     uint8_t *ToRead = Buf->Buffer + Offset;
+     if (Stream->FrameOffset)
+     {
+      Res = lsqpack_dec_header_read(&Stream->Con->Dec, (void *)Stream, &ToRead, Avail, 0, 0);
+     }
+     else
+     {
+      Res = lsqpack_dec_header_in(&Stream->Con->Dec, (void *)Stream, Stream->Id, FrameLn, &ToRead, Avail, 0, 0);
+     }
+
+     if (Res == LQRHS_DONE)
+     {
+      Offset += Avail;
+      Stream->FrameOffset += Avail;
+
+      if (ReqConnectValidate(Stream->Req))
+      {
+       if (!Stream->Con->PeerSettings.Recvd || Stream->Con->SessionStream)
+       {
+        // todo err
+        printf("Bad connnect req\n");
+        StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
+        return QUIC_STATUS_SUCCESS;
+       }
+       else
+       {
+        Stream->Con->SessionStream = Stream;
+        printf("Recvd valid connect req\n");
+
+        h3_header Headers[] = { (h3_header){.Name = CStr(":status"), .Val = CStr("200")} };
+        H3HeaderEncode(&Stream->Con->Enc, Stream->Id, Headers, ArrLen(Headers), &Stream->Con->ResHeaderFrame);
+
+        if (QUIC_FAILED(MsQuic->StreamSend(QStream, Stream->Con->ResHeaderFrame.Buffers, ArrLen(Stream->Con->ResHeaderFrame.Buffers), QUIC_SEND_FLAG_NONE, 0)))
+        {
+         StreamSendShutdown(MsQuic, QStream, H3ErrInternalError);
+         return QUIC_STATUS_SUCCESS;
+        }
+        printf("Sent connect response\n");
+       }
+      }
+      else
+      {
+       // todo
+       printf("Bad connnect req\n");
+       StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
+       return QUIC_STATUS_SUCCESS;
+      }
+     }
+     else if (Res == LQRHS_NEED)
+     {
+      // go to next buf, NEED MOAR DATA
+      Stream->FrameOffset += Avail;
+      Offset += Avail;
+     }
+    } break;
+    case H3FrameData:
+    {
+     printf("Recv data frame\n");
+     Stream->FrameOffset += Avail;
+     Offset += Avail;
+    } break;
+    default:
+    {
+     printf("Recv unknown bidi frame\n");
+     Stream->FrameOffset += Avail;
+     Offset += Avail;
+    } break;
+   }
+
+   if (Stream->FrameOffset == FrameLn)
+   {
+    MemoryZeroStruct(&Stream->CurFrameHeader);
+    Stream->FrameOffset = 0;
+   }
+  }
+ }
+
  return QUIC_STATUS_SUCCESS;
 }
 
@@ -820,7 +1268,7 @@ ServerBidiStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
     return QUIC_STATUS_SUCCESS;
    }
 
-   if (!Stream->StreamHeader.Success)
+   if (Stream->Id == UINT64_MAX)
    {
     for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
     {
@@ -830,25 +1278,37 @@ ServerBidiStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
      Buf->Buffer += (uint32_t)Offset;
      Buf->Length -= (uint32_t)Offset;
     }
-   }
-   if (Stream->StreamHeader.Success)
-   {
-    if (Stream->StreamHeader.Val1 == H3FrameHeaders)
+    if (Stream->StreamHeader.Success)
     {
-     return ServerBidiH3StreamCallback(QStream, Ctx, Event);
-    }
-    else if (Stream->StreamHeader.Val1 == H3StreamBidiWebtransportStream)
-    {
-     return ServerBidiWtStreamCallback(QStream, Ctx, Event);
+     if (Stream->StreamHeader.Val1 == H3FrameHeaders)
+     {
+      Stream->CurFrameHeader = Stream->StreamHeader;
+     }
+
+     uint32_t StreamIdSize = sizeof(Stream->Id);
+     if (QUIC_FAILED(MsQuic->GetParam(QStream, QUIC_PARAM_STREAM_ID, &StreamIdSize, &Stream->Id)))
+     {
+      ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrInternalError);
+      return QUIC_STATUS_SUCCESS;
+     }
     }
     else
     {
-     StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
      return QUIC_STATUS_SUCCESS;
     }
    }
+
+   if (Stream->StreamHeader.Val1 == H3FrameHeaders)
+   {
+    return ServerBidiH3Receive(QStream, Ctx, Event);
+   }
+   else if (Stream->StreamHeader.Val1 == H3StreamBidiWebtransportStream)
+   {
+    return ServerBidiWtReceive(QStream, Ctx, Event);
+   }
    else
    {
+    StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
     return QUIC_STATUS_SUCCESS;
    }
   } break;
@@ -876,17 +1336,44 @@ ServerBidiStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 }
 
 static wt_stream *
-ConPushStream(size_t Id, wt_con *Con)
+StreamPush(size_t Id, wt_con *Con)
 {
- wt_stream *Stream = ArPush(Con->Srv->Ar, wt_stream, 1);
- Stream->Id = Id;
- Stream->Con = Con;
- SLLStackPush(Con->FirstStream, Stream);
- return Stream;
+ wt_stream *Ret = Con->FreeStream;
+ if (Ret)
+ {
+  SLLStackPop(Con->FreeStream);
+ }
+ else
+ {
+  Ret = ArPush(Con->Ar, wt_stream, 1);
+ }
+
+ Ret->Id = Id;
+ Ret->Con = Con;
+ DLLPushFront(Con->FirstStream, Con->LastStream, Ret);
+ return Ret;
+}
+
+static void
+StreamFree(wt_con *Con, wt_stream *Stream)
+{
+ DLLRemove(Con->FirstStream, Con->LastStream, Stream);
+ SLLStackPush(Con->FreeStream, Stream);
+ if (Stream->Req)
+ {
+  SLLStackPush(Con->FreeReq, Stream->Req);
+ }
+ MemoryZeroStruct(Stream);
+}
+
+static void
+ReqAlloc(wt_con *Con, wt_stream *Stream)
+{
+ // if (Con)
 }
 
 static QUIC_STATUS
-ServerConnectionCallback(HQUIC Connection, void *Ctx, QUIC_CONNECTION_EVENT *Event)
+ServerConnectionCallback(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event)
 {
  wt_con *Con = (wt_con *)Ctx;
  QUIC_API_TABLE *MsQuic = Con->Srv->MsQuic;
@@ -896,28 +1383,25 @@ ServerConnectionCallback(HQUIC Connection, void *Ctx, QUIC_CONNECTION_EVENT *Eve
  case QUIC_CONNECTION_EVENT_CONNECTED:
  {
   // The handshake has completed for the connection.
-  printf("[conn][%p] Connected\n", Connection);
+  printf("[conn][%p] Connected\n", QCon);
 
-  Con->QCon = Connection;
-  wt_stream *Stream = ConPushStream(0, Con);
-  if (QUIC_FAILED(MsQuic->StreamOpen(Connection, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, ServerUniStreamCallback, Stream, &Con->ControlStream)))
+  Con->QCon = QCon;
+  wt_stream *Stream = StreamPush(0, Con);
+  if (QUIC_FAILED(MsQuic->StreamOpen(QCon, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, ServerUniStreamCallback, Stream, &Con->ControlStream)))
   {
-   // todo change to dllstack or something, proper stream dealloc
-   SLLStackPop(Con->FirstStream);
-   SLLStackPush(Con->FreeStream, Stream);
-   ConnectionShutdown(MsQuic, Connection, H3ErrInternalError);
+   StreamFree(Con, Stream);
+   ConnectionShutdown(MsQuic, QCon, H3ErrInternalError);
    return QUIC_STATUS_SUCCESS;
   }
   if (QUIC_FAILED(MsQuic->StreamStart(Con->ControlStream, QUIC_STREAM_START_FLAG_NONE)))
   {
-   SLLStackPop(Con->FirstStream);
-   SLLStackPush(Con->FreeStream, Stream);
+   StreamFree(Con, Stream);
    MsQuic->StreamClose(Con->ControlStream);
-   ConnectionShutdown(MsQuic, Connection, H3ErrInternalError);
+   ConnectionShutdown(MsQuic, QCon, H3ErrInternalError);
    return QUIC_STATUS_SUCCESS;
   }
 
-  MsQuic->ConnectionSendResumptionTicket(Connection, QUIC_SEND_RESUMPTION_FLAG_NONE, 0, NULL);
+  MsQuic->ConnectionSendResumptionTicket(QCon, QUIC_SEND_RESUMPTION_FLAG_NONE, 0, NULL);
   break;
  }
  case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
@@ -927,26 +1411,36 @@ ServerConnectionCallback(HQUIC Connection, void *Ctx, QUIC_CONNECTION_EVENT *Eve
   // protocol, since we let idle timeout kill the connection.
   if (Event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status == QUIC_STATUS_CONNECTION_IDLE)
   {
-   printf("[conn][%p] Successfully shut down on idle.\n", Connection);
+   printf("[conn][%p] Successfully shut down on idle.\n", QCon);
   }
   else
   {
-   printf("[conn][%p] Shut down by transport, 0x%x\n", Connection, Event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status);
+   printf("[conn][%p] Shut down by transport, 0x%x\n", QCon, Event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status);
   }
   break;
  }
  case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
  {
   // The connection was explicitly shut down by the peer.
-  printf("[conn][%p] Shut down by peer, 0x%llu\n", Connection, (unsigned long long)Event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
+  printf("[conn][%p] Shut down by peer, 0x%llu\n", QCon, (unsigned long long)Event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
   break;
  }
  case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
  {
   // The connection has completed the shutdown process and is ready to be
   // safely cleaned up.
-  printf("[conn][%p] All done\n", Connection);
-  MsQuic->ConnectionClose(Connection);
+  printf("[conn][%p] All done\n", QCon);
+
+   // free connection
+   {
+    DLLRemove(Con->Srv->First, Con->Srv->Last, Con);
+    SLLStackPush(Con->Srv->Free, Con);
+    lsqpack_dec_cleanup(&Con->Dec);
+    ArRelease(Con->Ar);
+    MemoryZeroStruct(Con);
+   }
+
+   MsQuic->ConnectionClose(QCon);
   break;
  }
  // todo
@@ -954,7 +1448,7 @@ ServerConnectionCallback(HQUIC Connection, void *Ctx, QUIC_CONNECTION_EVENT *Eve
  {
   printf("[strm][%p] Peer started\n", Event->PEER_STREAM_STARTED.Stream);
 
-  wt_stream *Stream = ConPushStream(UINT64_MAX, Con);
+  wt_stream *Stream = StreamPush(UINT64_MAX, Con);
   if (Event->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL)
   {
    MsQuic->SetCallbackHandler(Event->PEER_STREAM_STARTED.Stream, (void *)ServerUniStreamCallback, (void *)Stream);
@@ -969,7 +1463,7 @@ ServerConnectionCallback(HQUIC Connection, void *Ctx, QUIC_CONNECTION_EVENT *Eve
  {
   // The connection succeeded in doing a TLS resumption of a previous
   // connection's session.
-  printf("[conn][%p] Connection resumed!\n", Connection);
+  printf("[conn][%p] Connection resumed!\n", QCon);
   break;
  }
  default:
@@ -989,9 +1483,23 @@ ServerListenerCallback(HQUIC Listener, void *Ctx, QUIC_LISTENER_EVENT *Event)
  {
  case QUIC_LISTENER_EVENT_NEW_CONNECTION:
  {
+
+  // create new connection
+
   wt_con *Con = ArPush(Srv->Ar, wt_con, 1);
-  Con->Srv = Srv;
-  SLLStackPush(Srv->First, Con);
+  {
+   Con->Ar = ArAlloc();
+   static lsqpack_dec_hset_if QpackDecIf = {
+    .dhi_unblocked = QpackUnblocked,
+    .dhi_prepare_decode = QpackPrepareDecode,
+    .dhi_process_header = QpackProcessHeader,
+   };
+   lsqpack_dec_init(&Con->Dec, 0, 0, 0, &QpackDecIf, (lsqpack_dec_opts)0);
+   lsqpack_enc_preinit(&Con->Enc, 0);
+   Con->Srv = Srv;
+   DLLPushFront(Srv->First, Srv->Last, Con);
+  }
+ 
   Srv->MsQuic->SetCallbackHandler(Event->NEW_CONNECTION.Connection, (void *)ServerConnectionCallback, (void *)Con);
   Status = Srv->MsQuic->ConnectionSetConfiguration(Event->NEW_CONNECTION.Connection, Srv->Configuration);
   break;
@@ -1013,6 +1521,7 @@ ServerListenerCallback(HQUIC Listener, void *Ctx, QUIC_LISTENER_EVENT *Event)
 int
 main(int argc, char* argv[])
 {
+ OS_Init(&OS_W32State);
  ar *Ar = ArAlloc();
  wt_server *Srv = ArPush(Ar, wt_server, 1);
  Srv->Ar = Ar;
