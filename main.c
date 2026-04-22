@@ -82,9 +82,12 @@ enum
  H3SettingQpackBlockedStreams = 0x07,
  H3SettingEnableConnectProtocol = 0x08,
  H3SettingH3Datagram = 0x33,
- H3SettingH3Draft04Datagram = 0xffd277,
  H3SettingEnableWebtransport = 0x2b603742,
  H3SettingWebtransportMaxSessions = 0x2b603743,
+
+ H3SettingH3Draft04Datagram = 0xffd277,
+ H3SettingWtMaxSessionsDraft7 = 0xc671706a,
+ H3SettingWtEnabledDraft15 = 0x2c7cf000,
 };
 
 typedef uint64_t wt_capsule_kind;
@@ -138,6 +141,9 @@ struct h3_settings
  uint32_t DatagramOn;
  uint32_t ConnectProtocolOn;
  uint32_t WebtransportOn;
+
+ uint32_t WtMaxSessionsDraft7;
+ uint32_t WebtransportEnabledDraft15;
 
  uint32_t Sent;
  uint32_t Recvd;
@@ -430,6 +436,10 @@ QpackProcessHeader(void *Ctx, lsxpack_header *Header)
    printf("Ran out of header space\n");
    Req->Fail = 1;
   }
+ }
+ else
+ {
+  printf("[HEADER] Ignoring header: %.*s %.*s\n", (uint32_t)Name.Ln, Name.Mem, (uint32_t)Val.Ln, Val.Mem);
  }
 
  return 0;
@@ -757,10 +767,6 @@ H3SettingsInsert(h3_settings *Out, uint64_t SettingType, uint64_t SettingVal)
   {
    Out->DatagramOn = (uint32_t)SettingVal;
   } break;
-  case H3SettingH3Draft04Datagram:
-  {
-   Out->DatagramOn = (uint32_t)SettingVal;
-  } break;
   case H3SettingEnableWebtransport:
   {
    Out->WebtransportOn = (uint32_t)SettingVal;
@@ -769,9 +775,23 @@ H3SettingsInsert(h3_settings *Out, uint64_t SettingType, uint64_t SettingVal)
   {
    Out->WtMaxSessions = (uint32_t)SettingVal;
   } break;
+  // todo distinct struct field for this?
+  case H3SettingH3Draft04Datagram:
+  {
+   Out->DatagramOn = (uint32_t)SettingVal;
+  } break;
+  case H3SettingWtMaxSessionsDraft7:
+  {
+   Out->WtMaxSessionsDraft7 = (uint32_t)SettingVal;
+  } break;
+  case H3SettingWtEnabledDraft15:
+  {
+   Out->WebtransportEnabledDraft15 = (uint32_t)SettingVal;
+  } break;
   default:
   {
    Ret = 0;
+   printf("[SETTING] Recvd unknown setting: %zd %zd\n", SettingType, SettingVal);
   }
  }
  return Ret;
@@ -844,6 +864,23 @@ WtVarintPairDecoderDecode(char *ArrMem, size_t ArrLn, size_t *Offset, varint_pai
  return Cache->Success;
 }
 
+static void
+H3SettingsLog(h3_settings *Settings)
+{
+ printf("[SETTING] MaxFieldSectionSize: %d\n", Settings->MaxFieldSectionSize);
+ printf("[SETTING] QpackMaxTableLn: %d\n", Settings->QpackMaxTableLn);
+ printf("[SETTING] QpackBlockedStreams: %d\n", Settings->QpackBlockedStreams);
+ printf("[SETTING] WtMaxSessions: %d\n", Settings->WtMaxSessions);
+
+ printf("[SETTING] DatagramOn: %d\n", Settings->DatagramOn);
+ printf("[SETTING] ConnectProtocolOn: %d\n", Settings->ConnectProtocolOn);
+ printf("[SETTING] WebtransportOn: %d\n", Settings->WebtransportOn);
+ printf("[SETTING] WebtransportEnabledDraft15: %d\n", Settings->WebtransportEnabledDraft15);
+
+ printf("[SETTING] Sent: %d\n", Settings->Sent);
+ printf("[SETTING] Recvd: %d\n", Settings->Recvd);
+}
+
 static uint32_t
 H3SettingsSer(h3_settings *Settings, char *Mem, size_t Ln, a8 *Out)
 {
@@ -869,6 +906,12 @@ H3SettingsSer(h3_settings *Settings, char *Mem, size_t Ln, a8 *Out)
  A8WriteVarInt(&TmpSettingsView, Settings->ConnectProtocolOn);
  A8WriteVarInt(&TmpSettingsView, H3SettingEnableWebtransport);
  A8WriteVarInt(&TmpSettingsView, Settings->WebtransportOn);
+
+ // todo keep here for future updates to protocol?
+ // A8WriteVarInt(&TmpSettingsView, H3SettingWtMaxSessionsDraft7);
+ // A8WriteVarInt(&TmpSettingsView, Settings->WtMaxSessionsDraft7);
+ // A8WriteVarInt(&TmpSettingsView, H3SettingWtEnabledDraft15);
+ // A8WriteVarInt(&TmpSettingsView, Settings->WebtransportEnabledDraft15);
 
  a8 FinalTmpSettings = A8(TmpSettings.Mem, TmpSettings.Ln - TmpSettingsView.Ln);
  
@@ -927,7 +970,7 @@ ServerControlStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
     }
     size_t FrameType = Stream->CurFrameHeader.Val1;
     size_t FrameLn = Stream->CurFrameHeader.Val2;
-    size_t Avail = Min(Buf->Length - Offset, FrameLn);
+    size_t Avail = Min(Buf->Length - Offset, FrameLn - Stream->FrameOffset);
 
     if (FrameType == H3FrameSettings)
     {
@@ -943,10 +986,10 @@ ServerControlStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
       Stream->FrameOffset += Offset - OgOffset;
       if (Stream->CurSetting.Success)
       {
-       Stream->CurSetting = (varint_pair_decoder){0};
        uint64_t SettingType = Stream->CurSetting.Val1;
        uint64_t SettingVal = Stream->CurSetting.Val2;
        H3SettingsInsert(&Stream->Con->PeerSettings, SettingType, SettingVal);
+       Stream->CurSetting = (varint_pair_decoder){0};
        if (Stream->FrameOffset < FrameLn)
        {
         continue;
@@ -954,6 +997,8 @@ ServerControlStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        Stream->FrameOffset = 0;
        Stream->CurFrameHeader = (varint_pair_decoder){0};
        Stream->Con->PeerSettings.Recvd = 1;
+       printf("[SETTING] Parsed peer settings:\n");
+       H3SettingsLog(&Stream->Con->PeerSettings);
        // todo validate recvd settings
 
        h3_settings LocalSettings = {
@@ -964,9 +1009,12 @@ ServerControlStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
         .DatagramOn = 1,
         .ConnectProtocolOn = 1,
         .WebtransportOn = 1,
+        .WebtransportEnabledDraft15 = 1,
        };
        QUIC_BUFFER *SendBuf = &Stream->Con->QBuf;
        a8 Msg = {0};
+       printf("[SETTING] Sending response:\n");
+       H3SettingsLog(&LocalSettings);
        if (!H3SettingsSer(&LocalSettings, Stream->Con->SettingsMsg, sizeof(Stream->Con->SettingsMsg), &Msg))
        {
         ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrInternalError);
@@ -974,7 +1022,6 @@ ServerControlStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        }
        SendBuf->Buffer = Msg.Mem;
        SendBuf->Length = (uint32_t)Msg.Ln;
-       printf("Sending settings\n");
 
        if (QUIC_FAILED(MsQuic->StreamSend(Stream->Con->ControlStream, SendBuf, 1, QUIC_SEND_FLAG_NONE, 0)))
        {
@@ -999,15 +1046,27 @@ ServerControlStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
     }
     else if (FrameType == H3FrameGoaway)
     {
-     MemoryZeroStruct(&Stream->CurFrameHeader);
+     Offset += Avail;
+     Stream->FrameOffset += Avail;
+     if (Stream->FrameOffset == FrameLn)
+     {
+      Stream->FrameOffset = 0;
+      MemoryZeroStruct(&Stream->CurFrameHeader);
+     }
      ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrNoError);
     }
     else
     {
-     MemoryZeroStruct(&Stream->CurFrameHeader);
      if (!Stream->Con->PeerSettings.Recvd)
      {
       ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrGeneralProtocolError);
+     }
+     Offset += Avail;
+     Stream->FrameOffset += Avail;
+     if (Stream->FrameOffset == FrameLn)
+     {
+      Stream->FrameOffset = 0;
+      MemoryZeroStruct(&Stream->CurFrameHeader);
      }
      // ignore unkown frames
     }
@@ -1109,14 +1168,17 @@ ServerUniStreamCallback(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   {
    case H3StreamControl:
    {
+    printf("Recv control stream\n");
     return ServerControlStreamCallback(QStream, Ctx, Event);
    } break;
    case H3StreamQpackEncoder:
    {
+    printf("Recv qpack encoder\n");
     return QUIC_STATUS_SUCCESS;
    } break;
    case H3StreamQpackDecoder:
    {
+    printf("Recv qpack decoder\n");
     return QUIC_STATUS_SUCCESS;
    } break;
    case H3StreamUniWebtransportStream:
@@ -1202,7 +1264,11 @@ ServerBidiH3Receive(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
         Stream->Con->SessionStream = Stream;
         printf("Recvd valid connect req\n");
 
-        h3_header Headers[] = { (h3_header){.Name = CStr(":status"), .Val = CStr("200")} };
+        h3_header Headers[] = {
+         (h3_header){.Name = CStr(":status"), .Val = CStr("200")},
+         // todo not sure if this is needed? Chrome + Firefox send this header...
+         // (h3_header){.Name = CStr("sec-webtransport-http3-draft02"), .Val = CStr("1")},
+        };
         H3HeaderEncode(&Stream->Con->Enc, Stream->Id, Headers, ArrLen(Headers), &Stream->Con->ResHeaderFrame);
 
         if (QUIC_FAILED(MsQuic->StreamSend(QStream, Stream->Con->ResHeaderFrame.Buffers, ArrLen(Stream->Con->ResHeaderFrame.Buffers), QUIC_SEND_FLAG_NONE, 0)))
@@ -1563,7 +1629,7 @@ main(int argc, char* argv[])
 
  if (Srv->MsQuic && Srv->Registration)
  {
-  uint64_t IdleTimeoutMs = 1000;
+  uint64_t IdleTimeoutMs = 30000;
   QUIC_SETTINGS Settings = {0};
   Settings.IdleTimeoutMs = IdleTimeoutMs;
   Settings.IsSet.IdleTimeoutMs = TRUE;
@@ -1582,6 +1648,8 @@ main(int argc, char* argv[])
   Settings.IsSet.StreamRecvWindowDefault = TRUE;
   Settings.ConnFlowControlWindow = 1024 * 1024;
   Settings.IsSet.ConnFlowControlWindow = TRUE;
+  Settings.KeepAliveIntervalMs = 10000;
+  Settings.IsSet.KeepAliveIntervalMs = TRUE;
 
   QUIC_CERTIFICATE_HASH Thumbprint = {0};
   DecodeHexBuffer("4f56656a0f49cd4564f0cad2766ffef89e8e4933", sizeof(Thumbprint.ShaHash), Thumbprint.ShaHash);
