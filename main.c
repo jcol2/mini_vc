@@ -1532,6 +1532,23 @@ ServerConnectionCallback(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event)
   printf("[conn][%p] Connection resumed!\n", QCon);
   break;
  }
+ case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED:
+ {
+  QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->DATAGRAM_RECEIVED.Buffer;
+  QUIC_RECEIVE_FLAGS RecvFlags = Event->DATAGRAM_RECEIVED.Flags;
+  a8 View = A8(Buf->Buffer, Buf->Length);
+  uint64_t QuarterId = 0;
+  A8EatVarInt(&View, &QuarterId);
+  if (Con->SessionStream && QuarterId == (Con->SessionStream->Id / 4))
+  {
+   printf("[DGRAM] QuarterId: %zd, Payload: %.*s\n", QuarterId, (uint32_t)View.Ln, View.Mem);
+  }
+  else
+  {
+   printf("[DGRAM] Recv dgram with bad quarter id\n");
+  }
+
+ } break;
  default:
  {
   break;
