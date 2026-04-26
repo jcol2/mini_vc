@@ -7,3 +7,4 @@
 
 set SSLKEYLOGFILE=%~dp0\sslkeylogfile.log
 start chrome https://127.0.0.1:5500/tools/client.html
+start chrome https://127.0.0.1:5501/
