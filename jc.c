@@ -650,20 +650,20 @@ struct os_process_info
  // a1_list environment;
 };
 
-static os_sys_info *OS_GetSysInfo();
+static os_sys_info *OsGetSysInfo();
 static os_process_info *OS_GetProcessInfo();
 
 static void *
-OS_Reserve(size_t Size);
+OsReserve(size_t Size);
 
 static void *
-OS_Commit(void *Mem, size_t Size);
+OsCommit(void *Mem, size_t Size);
 
 static uint32_t
-OS_Decommit(void *Mem, size_t Size);
+OsDecommit(void *Mem, size_t Size);
 
 static uint32_t
-OS_Release(void *Mem, size_t Size);
+OsRelease(void *Mem, size_t Size);
 
 
 
@@ -707,7 +707,7 @@ _ArAlloc(ar_params In)
  Assert(In.Com && In.Res && In.PageSize && (In.Com <= In.Res));
  size_t Res = Max(AlignPow2(In.Res, In.PageSize), AR_HEADER_SIZE);
  size_t Com = Max(AlignPow2(In.Com, In.PageSize), AR_HEADER_SIZE);
- ar *Ar = OS_Commit(OS_Reserve(Res), Com);
+ ar *Ar = OsCommit(OsReserve(Res), Com);
  if (Ar)
  {
   *Ar = (ar){
@@ -721,7 +721,7 @@ _ArAlloc(ar_params In)
  }
  return Ar;
 }
-#define ArAlloc(...) _ArAlloc((ar_params){.Com = Kib(10), .Res = Mib(1), .PageSize = OS_GetSysInfo()->PageSize, __VA_ARGS__})
+#define ArAlloc(...) _ArAlloc((ar_params){.Com = Kib(10), .Res = Mib(1), .PageSize = OsGetSysInfo()->PageSize, __VA_ARGS__})
 
 static void
 ArRelease(ar *Ar)
@@ -729,7 +729,7 @@ ArRelease(ar *Ar)
  for (ar *N = Ar->First, *Prev = 0; N; N = Prev)
  {
   Prev = N->Prev; // hold this before release
-  OS_Release(N, N->Res);
+  OsRelease(N, N->Res);
  }
 }
 
@@ -754,7 +754,7 @@ ArPushEx(ar *Ar, size_t Len, size_t Aln, uint32_t Zero)
  if (Cur->Com < NewLen)
  {
   size_t CmtLen = Min((NewLen + Cur->OgCom - 1) - ((NewLen + Cur->OgCom - 1) % Cur->OgCom) - Cur->Com, Cur->Res - Cur->Com);
-  OS_Commit((char *)Cur + Cur->Com, CmtLen);
+  OsCommit((char *)Cur + Cur->Com, CmtLen);
   Cur->Com += CmtLen;
  }
 
@@ -779,7 +779,7 @@ ArPopTo(ar *Ar, size_t Len)
  ar *Cur = Ar->First;
  for (; Cur->BaseLen > AccLen; Cur = Cur->Prev)
  {
-  OS_Release(Cur, Cur->Res);
+  OsRelease(Cur, Cur->Res);
  }
  Ar->First = Cur;
  Assert((AccLen - Cur->BaseLen) <= Cur->Len);
@@ -836,45 +836,45 @@ ArTmpEnd(ar_tmp ArTmp)
 typedef struct thread thread;
 struct thread
 {
- size_t U8[1];
+ uint64_t U64[1];
 };
 
-typedef struct mx mx;
-struct mx
+typedef struct mtx mtx;
+struct mtx
 {
- size_t U8[1];
+ uint64_t U64[1];
 };
 
-typedef struct rw rw;
-struct rw
+typedef struct rw_mtx rw_mtx;
+struct rw_mtx
 {
- size_t U8[1];
+ uint64_t U64[1];
 };
 
-typedef struct cv cv;
-struct cv
+typedef struct cond_var cond_var;
+struct cond_var
 {
- size_t U8[1];
+ uint64_t U64[1];
 };
 
 typedef struct semaphore semaphore;
 struct semaphore
 {
- size_t U8[1];
+ uint64_t U64[1];
 };
 
-typedef struct bar bar;
-struct bar
+typedef struct barrier barrier;
+struct barrier
 {
- size_t U8[1];
+ uint64_t U64[1];
 };
 
 typedef struct stripe stripe;
 struct stripe
 {
  ar *Ar;
- rw Rw;
- cv Cv;
+ rw_mtx Rw;
+ cond_var Cv;
  void *Free;
 };
 
@@ -890,7 +890,7 @@ struct lane_ctx
 {
  size_t LaneIdx;
  size_t LaneCnt;
- bar Barrier;
+ barrier Barrier;
  size_t *BroadcastMem;
 };
 
@@ -914,7 +914,7 @@ struct touch
 {
  touch *Next;
  access_pt *Pt;
- cv Cv;
+ cond_var Cv;
 };
 
 typedef struct access access;
@@ -1057,12 +1057,12 @@ typedef void thread_entry_point_fn(void *P);
 typedef uint32_t os_w32_ent_kind;
 enum
 {
- OS_W32_EntityKind_Null,
- OS_W32_EntityKind_Thread,
- OS_W32_EntityKind_Mutex,
- OS_W32_EntityKind_RWMutex,
- OS_W32_EntityKind_ConditionVariable,
- OS_W32_EntityKind_Barrier,
+ OsW32EntityNull,
+ OsW32EntityThread,
+ OsW32EntityMutex,
+ OsW32EntityRwMutex,
+ OsW32EntityConditionVariable,
+ OsW32EntityBarrier,
 };
 
 typedef struct os_w32_ent os_w32_ent;
@@ -1104,7 +1104,7 @@ struct os_w32_state
 static os_w32_state OS_W32State = {0};
 
 static void
-OS_Init(os_w32_state *In)
+OsInit(os_w32_state *In)
 {
  SYSTEM_INFO SysInfo = {0};
  GetSystemInfo(&SysInfo);
@@ -1129,32 +1129,138 @@ OS_Init(os_w32_state *In)
  TlsTctx = TctxAlloc();
 }
 
+static os_w32_ent *
+OsEntityAlloc(os_w32_ent_kind Kind)
+{
+ os_w32_ent *Ret = 0;
+ EnterCriticalSection(&OS_W32State.EntMtx);
+ {
+  Ret = OS_W32State.EntFree;
+  if (Ret)
+  {
+   SLLStackPop(OS_W32State.EntFree);
+  }
+  else
+  {
+   Ret = ArPushNoZero(OS_W32State.EntAr, os_w32_ent, 1);
+  }
+  MemoryZeroStruct(&OS_W32State.EntMtx);
+ }
+ LeaveCriticalSection(&OS_W32State.EntMtx);
+ Ret->Kind = Kind;
+ return Ret;
+}
+
+static void
+OsEntityRelease(os_w32_ent *Ent)
+{
+ Ent->Kind = OsW32EntityNull;
+ EnterCriticalSection(&OS_W32State.EntMtx);
+ SLLStackPush(OS_W32State.EntFree, Ent);
+ LeaveCriticalSection(&OS_W32State.EntMtx);
+}
+
+static mtx
+OsMutexAlloc()
+{
+ os_w32_ent *Ent = OsEntityAlloc(OsW32EntityRwMutex);
+ InitializeCriticalSection(&Ent->Mtx);
+ mtx Ret = {(uint64_t)Ent};
+ return Ret;
+}
+
+static void
+OsMutexRelease(mtx Mtx)
+{
+ os_w32_ent *Ent = (os_w32_ent *)Mtx.U64[0];
+ DeleteCriticalSection(&Ent->Mtx);
+ OsEntityRelease(Ent);
+}
+
+static void
+OsMutexTake(mtx Mtx)
+{
+ os_w32_ent *Ent = (os_w32_ent *)Mtx.U64[0];
+ EnterCriticalSection(&Ent->Mtx);
+}
+
+static void
+OsMutexDrop(mtx Mtx)
+{
+ os_w32_ent *Ent = (os_w32_ent *)Mtx.U64[0];
+ LeaveCriticalSection(&Ent->Mtx);
+}
+
+static rw_mtx
+OsRwMutexAlloc()
+{
+ os_w32_ent *Ent = OsEntityAlloc(OsW32EntityRwMutex);
+ InitializeSRWLock(&Ent->Rwmtx);
+ rw_mtx Ret = {(uint64_t)Ent};
+ return Ret;
+}
+
+static void
+OSRwMutexRelease(rw_mtx RwMtx)
+{
+ os_w32_ent *Ent = (os_w32_ent *)RwMtx.U64[0];
+ OsEntityRelease(Ent);
+}
+
+static void
+OSRwMutexTake(rw_mtx RwMtx, uint32_t WriteMode)
+{
+ os_w32_ent *Ent = (os_w32_ent *)RwMtx.U64[0];
+ if (WriteMode)
+ {
+  AcquireSRWLockExclusive(&Ent->Rwmtx);
+ }
+ else
+ {
+  AcquireSRWLockShared(&Ent->Rwmtx);
+ }
+}
+
+static void
+OsRwMutexDrop(rw_mtx RwMtx, uint32_t WriteMode)
+{
+ os_w32_ent *Ent = (os_w32_ent *)RwMtx.U64[0];
+ if (WriteMode)
+ {
+  ReleaseSRWLockExclusive(&Ent->Rwmtx);
+ }
+ else
+ {
+  ReleaseSRWLockShared(&Ent->Rwmtx);
+ }
+}
+
 static os_sys_info *
-OS_GetSysInfo()
+OsGetSysInfo()
 {
  return &OS_W32State.SysInfo;
 }
 
 static void *
-OS_Reserve(size_t Size)
+OsReserve(size_t Size)
 {
  return VirtualAlloc(0, Size, MEM_RESERVE, PAGE_NOACCESS);
 }
 
 static void *
-OS_Commit(void *Mem, size_t Size)
+OsCommit(void *Mem, size_t Size)
 {
  return VirtualAlloc(Mem, Size, MEM_COMMIT, PAGE_READWRITE);
 }
 
 static uint32_t
-OS_Decommit(void *Mem, size_t Size)
+OsDecommit(void *Mem, size_t Size)
 {
  return VirtualFree(Mem, Size, MEM_DECOMMIT);
 }
 
 static uint32_t
-OS_Release(void *Mem, size_t Size)
+OsRelease(void *Mem, size_t Size)
 {
  Size;
  return VirtualFree(Mem, 0, MEM_RELEASE);

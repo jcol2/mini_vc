@@ -217,6 +217,7 @@ struct wt_req
 struct wt_con
 {
  ar *Ar;
+ 
  h3_settings PeerSettings;
  HQUIC ControlStream;
  HQUIC QCon;
@@ -1210,7 +1211,7 @@ WtUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   }
   // By this point, stream header and stream id should be known
 
-  size_t StreamType = Stream->StreamHeader.Val1;
+  uint64_t StreamType = Stream->StreamHeader.Val1;
   switch (StreamType)
   {
    case H3StreamControl:

@@ -3,7 +3,23 @@
 static QUIC_STATUS
 MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
- return WtUnidiCb(QStream, Ctx, Event);
+ wt_stream *Stream = (wt_stream *)Ctx;
+ QUIC_API_TABLE *MsQuic = Stream->Con->Srv->MsQuic;
+ WtUnidiCb(QStream, Ctx, Event);
+
+ // stream id is signal for header parse success
+ if (Stream->Id != UINT64_MAX)
+ {
+  uint64_t StreamType = Stream->StreamHeader.Val1;
+  if (StreamType == H3StreamUniWebtransportStream)
+  {
+   // todo forward this stream to all other connections
+   
+   // StreamPush()
+  }
+ }
+ 
+ return QUIC_STATUS_SUCCESS;
 }
 
 static QUIC_STATUS
@@ -27,7 +43,7 @@ MyListenCb(HQUIC Listener, void *Ctx, QUIC_LISTENER_EVENT *Event)
 int
 main(int argc, char* argv[])
 {
- OS_Init(&OS_W32State);
+ OsInit(&OS_W32State);
  ar *Ar = ArAlloc();
  wt_server *Srv = WtInit(Ar);
 
