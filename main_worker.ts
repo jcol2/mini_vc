@@ -1,3 +1,4 @@
+declare const CertFingerprint: string;
 let wt: WebTransport;
 let dgramWriter: WritableStreamDefaultWriter<any>;
 
@@ -25,7 +26,7 @@ async function
 HandleMsg(Msg: { data: { readable: ReadableStreamDefaultReader<VideoFrame | AudioData> }})
 {
  const reader = Msg.data.readable.getReader();
- const hashBytes: Uint8Array = Uint8Array.fromHex("9783d76643e750c11e4c00d16986c2f13924fdc163ca436b2aa875a01c2e47e2");
+ const hashBytes: Uint8Array = Uint8Array.fromHex(CertFingerprint);
  wt = new WebTransport(
   "https://127.0.0.1:4567/",
   {

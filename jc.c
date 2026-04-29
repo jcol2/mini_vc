@@ -1144,7 +1144,7 @@ OsEntityAlloc(os_w32_ent_kind Kind)
   {
    Ret = ArPushNoZero(OS_W32State.EntAr, os_w32_ent, 1);
   }
-  MemoryZeroStruct(&OS_W32State.EntMtx);
+  MemoryZeroStruct(Ret);
  }
  LeaveCriticalSection(&OS_W32State.EntMtx);
  Ret->Kind = Kind;

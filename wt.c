@@ -1,5 +1,10 @@
 // lil msquic helper lib for doing webtransport
 
+// silence vscode intellisense
+#ifdef __INTELLISENSE__
+# define CertThumbprint ""
+#endif
+
 #define _CRT_SECURE_NO_WARNINGS 1
 #define QUIC_API_ENABLE_PREVIEW_FEATURES 1
 
@@ -1675,7 +1680,7 @@ WtInit(ar *Ar)
     Settings.IsSet.KeepAliveIntervalMs = TRUE;
 
     QUIC_CERTIFICATE_HASH Thumbprint = {0};
-    DecodeHexBuffer("4f56656a0f49cd4564f0cad2766ffef89e8e4933", sizeof(Thumbprint.ShaHash), Thumbprint.ShaHash);
+    DecodeHexBuffer(CertThumbprint, sizeof(Thumbprint.ShaHash), Thumbprint.ShaHash);
     QUIC_CREDENTIAL_CONFIG CredConfig = {0};
     CredConfig.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH;
     CredConfig.CertificateHash = &Thumbprint;
