@@ -1273,13 +1273,13 @@ avail = min(frameleft, bufleft)
 avail >= frameleft   this should succeed, but if fail then bad req
 avail < frameleft    can succeed or fail, iteratively try again
 */
+// todo con->rwmtx lock necessary here? lsqpack doesn't like it
 static QUIC_STATUS
 WtBidiH3Recv(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
  wt_stream *Stream = (wt_stream *)Ctx;
  QUIC_API_TABLE *MsQuic = Stream->Con->Srv->MsQuic;
 
- OsRwMutexTake(Stream->Con->RwMtx, 1);
  for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
  {
   QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
@@ -1379,8 +1379,6 @@ WtBidiH3Recv(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  }
 
 Done:
- OsRwMutexDrop(Stream->Con->RwMtx, 1);
-
  return QUIC_STATUS_SUCCESS;
 }
 
