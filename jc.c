@@ -1201,14 +1201,14 @@ OsRwMutexAlloc()
 }
 
 static void
-OSRwMutexRelease(rw_mtx RwMtx)
+OsRwMutexRelease(rw_mtx RwMtx)
 {
  os_w32_ent *Ent = (os_w32_ent *)RwMtx.U64[0];
  OsEntityRelease(Ent);
 }
 
 static void
-OSRwMutexTake(rw_mtx RwMtx, uint32_t WriteMode)
+OsRwMutexTake(rw_mtx RwMtx, uint32_t WriteMode)
 {
  os_w32_ent *Ent = (os_w32_ent *)RwMtx.U64[0];
  if (WriteMode)

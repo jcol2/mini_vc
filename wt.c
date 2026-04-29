@@ -187,6 +187,7 @@ struct wt_server
  QUIC_BUFFER Alpn;
 
  ar *Ar;
+ mtx Mtx;
  QUIC_API_TABLE *MsQuic;
  HQUIC Registration;
  HQUIC Configuration;
@@ -217,6 +218,7 @@ struct wt_req
 struct wt_con
 {
  ar *Ar;
+ rw_mtx RwMtx;
  
  h3_settings PeerSettings;
  HQUIC ControlStream;
@@ -339,6 +341,7 @@ QpackProcessHeader(void *Ctx, lsxpack_header *Header)
  a8 Name = A8(Header->buf + Header->name_offset, Header->name_len);
  a8 Val = A8(Header->buf + Header->val_offset, Header->val_len);
 
+ OsRwMutexTake(Stream->Con->RwMtx, 1);
  if (!Stream->Req)
  {
   Stream->Req = Stream->Con->FreeReq;
@@ -353,6 +356,7 @@ QpackProcessHeader(void *Ctx, lsxpack_header *Header)
   Stream->Req->View = A8(Stream->Req->Dat, sizeof(Stream->Req->Dat));
  }
  wt_req *Req = Stream->Req;
+ OsRwMutexDrop(Stream->Con->RwMtx, 1);
 
  if (A8Eq(Name, CStr(":method")))
  {
@@ -947,6 +951,7 @@ static wt_stream *
 StreamPush(size_t Id, wt_con *Con)
 {
  wt_stream *Ret = Con->FreeStream;
+ OsRwMutexTake(Con->RwMtx, 1);
  if (Ret)
  {
   SLLStackPop(Con->FreeStream);
@@ -959,12 +964,14 @@ StreamPush(size_t Id, wt_con *Con)
  Ret->Id = Id;
  Ret->Con = Con;
  DLLPushFront(Con->FirstStream, Con->LastStream, Ret);
+ OsRwMutexDrop(Con->RwMtx, 1);
  return Ret;
 }
 
 static void
 StreamFree(wt_con *Con, wt_stream *Stream)
 {
+ OsRwMutexTake(Con->RwMtx, 1);
  DLLRemove(Con->FirstStream, Con->LastStream, Stream);
  SLLStackPush(Con->FreeStream, Stream);
  if (Stream->Req)
@@ -972,6 +979,7 @@ StreamFree(wt_con *Con, wt_stream *Stream)
   SLLStackPush(Con->FreeReq, Stream->Req);
  }
  MemoryZeroStruct(Stream);
+ OsRwMutexDrop(Con->RwMtx, 1);
 }
 
 static QUIC_STATUS
@@ -995,6 +1003,7 @@ WtControlStreamCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  {
   printf("[strm][%p] Data received\n", QStream);
 
+  OsRwMutexTake(Stream->Con->RwMtx, 1);
   for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
   {
    QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
@@ -1109,6 +1118,7 @@ WtControlStreamCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
     }
    }
   }
+  OsRwMutexDrop(Stream->Con->RwMtx, 1);
   break;
  }
  case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
@@ -1264,6 +1274,7 @@ WtBidiH3Recv(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  wt_stream *Stream = (wt_stream *)Ctx;
  QUIC_API_TABLE *MsQuic = Stream->Con->Srv->MsQuic;
 
+ OsRwMutexTake(Stream->Con->RwMtx, 1);
  for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
  {
   QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
@@ -1302,10 +1313,9 @@ WtBidiH3Recv(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
       {
        if (!Stream->Con->PeerSettings.Recvd || Stream->Con->SessionStream)
        {
-        // todo err
         printf("Bad connnect req\n");
         StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
-        return QUIC_STATUS_SUCCESS;
+        goto Done;
        }
        else
        {
@@ -1322,17 +1332,16 @@ WtBidiH3Recv(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
         if (QUIC_FAILED(MsQuic->StreamSend(QStream, Stream->Con->ResHeaderFrame.Buffers, ArrLen(Stream->Con->ResHeaderFrame.Buffers), QUIC_SEND_FLAG_NONE, 0)))
         {
          StreamSendShutdown(MsQuic, QStream, H3ErrInternalError);
-         return QUIC_STATUS_SUCCESS;
+         goto Done;
         }
         printf("Sent connect response\n");
        }
       }
       else
       {
-       // todo
        printf("Bad connnect req\n");
        StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
-       return QUIC_STATUS_SUCCESS;
+       goto Done;
       }
      }
      else if (Res == LQRHS_NEED)
@@ -1363,6 +1372,9 @@ WtBidiH3Recv(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
    }
   }
  }
+
+Done:
+ OsRwMutexDrop(Stream->Con->RwMtx, 1);
 
  return QUIC_STATUS_SUCCESS;
 }
@@ -1464,21 +1476,26 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
 
   Con->QCon = QCon;
   wt_stream *Stream = StreamPush(0, Con);
-  if (QUIC_FAILED(MsQuic->StreamOpen(QCon, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, WtUnidiCb, Stream, &Con->ControlStream)))
+  OsRwMutexTake(Con->RwMtx, 1);
+  if (QUIC_SUCCEEDED(MsQuic->StreamOpen(QCon, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, WtUnidiCb, Stream, &Con->ControlStream)))
+  {
+   if (QUIC_SUCCEEDED(MsQuic->StreamStart(Con->ControlStream, QUIC_STREAM_START_FLAG_NONE)))
+   {
+    MsQuic->ConnectionSendResumptionTicket(QCon, QUIC_SEND_RESUMPTION_FLAG_NONE, 0, NULL);
+   }
+   else
+   {
+    StreamFree(Con, Stream);
+    MsQuic->StreamClose(Con->ControlStream);
+    ConnectionShutdown(MsQuic, QCon, H3ErrInternalError);
+   }
+  }
+  else
   {
    StreamFree(Con, Stream);
    ConnectionShutdown(MsQuic, QCon, H3ErrInternalError);
-   return QUIC_STATUS_SUCCESS;
   }
-  if (QUIC_FAILED(MsQuic->StreamStart(Con->ControlStream, QUIC_STREAM_START_FLAG_NONE)))
-  {
-   StreamFree(Con, Stream);
-   MsQuic->StreamClose(Con->ControlStream);
-   ConnectionShutdown(MsQuic, QCon, H3ErrInternalError);
-   return QUIC_STATUS_SUCCESS;
-  }
-
-  MsQuic->ConnectionSendResumptionTicket(QCon, QUIC_SEND_RESUMPTION_FLAG_NONE, 0, NULL);
+  OsRwMutexDrop(Con->RwMtx, 1);
   break;
  }
  case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
@@ -1514,6 +1531,7 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
     SLLStackPush(Con->Srv->Free, Con);
     lsqpack_dec_cleanup(&Con->Dec);
     ArRelease(Con->Ar);
+    OsRwMutexRelease(Con->RwMtx);
     MemoryZeroStruct(Con);
    }
 
@@ -1550,6 +1568,7 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
   a8 View = A8(Buf->Buffer, Buf->Length);
   uint64_t QuarterId = 0;
   A8EatVarInt(&View, &QuarterId);
+  OsRwMutexTake(Con->RwMtx, 0);
   if (Con->SessionStream && QuarterId == (Con->SessionStream->Id / 4))
   {
    printf("[DGRAM] QuarterId: %zd, Payload: %.*s\n", QuarterId, (uint32_t)View.Ln, View.Mem);
@@ -1558,6 +1577,7 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
   {
    printf("[DGRAM] Recv dgram with bad quarter id\n");
   }
+  OsRwMutexDrop(Con->RwMtx, 0);
 
  } break;
  default:
@@ -1579,6 +1599,7 @@ WtListenCb(HQUIC Listener, void *Ctx, QUIC_LISTENER_EVENT *Event, void *ConCb)
  {
   wt_con *Con = ArPush(Srv->Ar, wt_con, 1);
   {
+   Con->RwMtx = OsRwMutexAlloc();
    Con->Ar = ArAlloc();
    static lsqpack_dec_hset_if QpackDecIf = {
     .dhi_unblocked = QpackUnblocked,
