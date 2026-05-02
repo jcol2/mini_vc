@@ -199,7 +199,6 @@ struct wt_server
 
  wt_con *First;
  wt_con *Last;
- wt_con *Free;
 };
 
 typedef struct wt_req wt_req;
@@ -237,7 +236,6 @@ struct wt_con
  wt_con *Prev;
  wt_stream *FirstStream;
  wt_stream *LastStream;
- wt_stream *FreeStream;
  wt_req *FreeReq;
 
  // for sending settings response
@@ -952,39 +950,56 @@ ReqConnectValidate(wt_req *Req)
    && Req->Origin.Ln;
 }
 
-static wt_stream *
-StreamPush(size_t Id, wt_con *Con)
+static void
+ConAlloc(wt_server *Srv, wt_con *Con, ar * Ar)
 {
- wt_stream *Ret = Con->FreeStream;
- OsRwMutexTake(Con->RwMtx, 1);
- if (Ret)
- {
-  SLLStackPop(Con->FreeStream);
- }
- else
- {
-  Ret = ArPush(Con->Ar, wt_stream, 1);
- }
-
- Ret->Id = Id;
- Ret->Con = Con;
- DLLPushFront(Con->FirstStream, Con->LastStream, Ret);
- OsRwMutexDrop(Con->RwMtx, 1);
- return Ret;
+ Con->RwMtx = OsRwMutexAlloc();
+ Con->Ar = Ar;
+ static lsqpack_dec_hset_if QpackDecIf = {
+  .dhi_unblocked = QpackUnblocked,
+  .dhi_prepare_decode = QpackPrepareDecode,
+  .dhi_process_header = QpackProcessHeader,
+ };
+ lsqpack_dec_init(&Con->Dec, 0, 0, 0, &QpackDecIf, (lsqpack_dec_opts)0);
+ lsqpack_enc_preinit(&Con->Enc, 0);
+ Con->Srv = Srv;
+ DLLPushFront(Srv->First, Srv->Last, Con);
 }
 
 static void
-StreamFree(wt_con *Con, wt_stream *Stream)
+ConFree(wt_con *Con)
+{
+ DLLRemove(Con->Srv->First, Con->Srv->Last, Con);
+ lsqpack_dec_cleanup(&Con->Dec);
+ ArRelease(Con->Ar);
+ OsRwMutexRelease(Con->RwMtx);
+ MemoryZeroStruct(Con);
+}
+
+static void
+StreamPush(size_t Id, wt_con *Con, wt_stream *Stream)
 {
  OsRwMutexTake(Con->RwMtx, 1);
- DLLRemove(Con->FirstStream, Con->LastStream, Stream);
- SLLStackPush(Con->FreeStream, Stream);
- if (Stream->Req)
  {
-  SLLStackPush(Con->FreeReq, Stream->Req);
+  Stream->Id = Id;
+  Stream->Con = Con;
+  DLLPushFront(Con->FirstStream, Con->LastStream, Stream);
  }
- MemoryZeroStruct(Stream);
  OsRwMutexDrop(Con->RwMtx, 1);
+}
+
+static void
+StreamFree(wt_stream *Stream)
+{
+ OsRwMutexTake(Stream->Con->RwMtx, 1);
+ {
+  DLLRemove(Stream->Con->FirstStream, Stream->Con->LastStream, Stream);
+  if (Stream->Req)
+  {
+   SLLStackPush(Stream->Con->FreeReq, Stream->Req);
+  }
+ }
+ OsRwMutexDrop(Stream->Con->RwMtx, 1);
 }
 
 static QUIC_STATUS
@@ -1465,7 +1480,7 @@ WtBidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 }
 
 static QUIC_STATUS
-WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void *BidiCb)
+WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void *BidiCb, void *CbCtx)
 {
  wt_con *Con = (wt_con *)Ctx;
  QUIC_API_TABLE *MsQuic = Con->Srv->MsQuic;
@@ -1477,26 +1492,29 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
   // The handshake has completed for the connection.
   printf("[conn][%p] Connected\n", QCon);
 
-  Con->QCon = QCon;
-  wt_stream *Stream = StreamPush(0, Con);
   OsRwMutexTake(Con->RwMtx, 1);
-  if (QUIC_SUCCEEDED(MsQuic->StreamOpen(QCon, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, WtUnidiCb, Stream, &Con->ControlStream)))
   {
-   if (QUIC_SUCCEEDED(MsQuic->StreamStart(Con->ControlStream, QUIC_STREAM_START_FLAG_NONE)))
+   Con->QCon = QCon;
+   wt_stream *Stream = ArPush(Con->Ar, wt_stream, 1);
+   StreamPush(0, Con, Stream);
+   if (QUIC_SUCCEEDED(MsQuic->StreamOpen(QCon, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, WtUnidiCb, Stream, &Con->ControlStream)))
    {
-    MsQuic->ConnectionSendResumptionTicket(QCon, QUIC_SEND_RESUMPTION_FLAG_NONE, 0, NULL);
+    if (QUIC_SUCCEEDED(MsQuic->StreamStart(Con->ControlStream, QUIC_STREAM_START_FLAG_NONE)))
+    {
+     MsQuic->ConnectionSendResumptionTicket(QCon, QUIC_SEND_RESUMPTION_FLAG_NONE, 0, NULL);
+    }
+    else
+    {
+     StreamFree(Stream);
+     MsQuic->StreamClose(Con->ControlStream);
+     ConnectionShutdown(MsQuic, QCon, H3ErrInternalError);
+    }
    }
    else
    {
-    StreamFree(Con, Stream);
-    MsQuic->StreamClose(Con->ControlStream);
+    StreamFree(Stream);
     ConnectionShutdown(MsQuic, QCon, H3ErrInternalError);
    }
-  }
-  else
-  {
-   StreamFree(Con, Stream);
-   ConnectionShutdown(MsQuic, QCon, H3ErrInternalError);
   }
   OsRwMutexDrop(Con->RwMtx, 1);
   break;
@@ -1527,33 +1545,20 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
   // The connection has completed the shutdown process and is ready to be
   // safely cleaned up.
   printf("[conn][%p] All done\n", QCon);
-
-   // free connection
-   {
-    DLLRemove(Con->Srv->First, Con->Srv->Last, Con);
-    SLLStackPush(Con->Srv->Free, Con);
-    lsqpack_dec_cleanup(&Con->Dec);
-    ArRelease(Con->Ar);
-    OsRwMutexRelease(Con->RwMtx);
-    MemoryZeroStruct(Con);
-   }
-
-   MsQuic->ConnectionClose(QCon);
+  MsQuic->ConnectionClose(QCon);
   break;
  }
- // todo
  case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
  {
   printf("[strm][%p] Peer started\n", Event->PEER_STREAM_STARTED.Stream);
 
-  wt_stream *Stream = StreamPush(UINT64_MAX, Con);
   if (Event->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL)
   {
-   MsQuic->SetCallbackHandler(Event->PEER_STREAM_STARTED.Stream, UnidiCb, (void *)Stream);
+   MsQuic->SetCallbackHandler(Event->PEER_STREAM_STARTED.Stream, UnidiCb, (void *)CbCtx);
   }
   else
   {
-   MsQuic->SetCallbackHandler(Event->PEER_STREAM_STARTED.Stream, BidiCb, (void *)Stream);
+   MsQuic->SetCallbackHandler(Event->PEER_STREAM_STARTED.Stream, BidiCb, (void *)CbCtx);
   }
   break;
  }
@@ -1592,7 +1597,7 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
 }
 
 static QUIC_STATUS
-WtListenCb(HQUIC Listener, void *Ctx, QUIC_LISTENER_EVENT *Event, void *ConCb)
+WtListenCb(HQUIC Listener, void *Ctx, QUIC_LISTENER_EVENT *Event, void *ConCb, void *ConCbCtx)
 {
  wt_server *Srv = (wt_server *)Ctx;
  QUIC_STATUS Status = QUIC_STATUS_NOT_SUPPORTED;
@@ -1600,22 +1605,7 @@ WtListenCb(HQUIC Listener, void *Ctx, QUIC_LISTENER_EVENT *Event, void *ConCb)
  {
  case QUIC_LISTENER_EVENT_NEW_CONNECTION:
  {
-  wt_con *Con = ArPush(Srv->Ar, wt_con, 1);
-  {
-   Con->RwMtx = OsRwMutexAlloc();
-   Con->Ar = ArAlloc();
-   static lsqpack_dec_hset_if QpackDecIf = {
-    .dhi_unblocked = QpackUnblocked,
-    .dhi_prepare_decode = QpackPrepareDecode,
-    .dhi_process_header = QpackProcessHeader,
-   };
-   lsqpack_dec_init(&Con->Dec, 0, 0, 0, &QpackDecIf, (lsqpack_dec_opts)0);
-   lsqpack_enc_preinit(&Con->Enc, 0);
-   Con->Srv = Srv;
-   DLLPushFront(Srv->First, Srv->Last, Con);
-  }
- 
-  Srv->MsQuic->SetCallbackHandler(Event->NEW_CONNECTION.Connection, ConCb, (void *)Con);
+  Srv->MsQuic->SetCallbackHandler(Event->NEW_CONNECTION.Connection, ConCb, (void *)ConCbCtx);
   Status = Srv->MsQuic->ConnectionSetConfiguration(Event->NEW_CONNECTION.Connection, Srv->Configuration);
   break;
  }
