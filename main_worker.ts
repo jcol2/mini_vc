@@ -2,24 +2,32 @@ declare const CertFingerprint: string;
 let wt: WebTransport;
 let dgramWriter: WritableStreamDefaultWriter<any>;
 
-function HandleChunk(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): void
+async function HandleChunk(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): Promise<void>
 {
  const buf = new Uint8Array(chunk.byteLength);
  chunk.copyTo(buf);
- const dgramLn = wt.datagrams.maxDatagramSize;
- const bufLeftoverLn = (buf.length % dgramLn);
- const bufRoundLn = buf.length - bufLeftoverLn;
- let i = 0;
- while (i < bufRoundLn)
- {
-  const i_next = i + dgramLn;
-  dgramWriter.write(buf.slice(i, i_next)).catch(console.error);
-  i = i_next;
- }
- if (bufLeftoverLn)
- {
-  dgramWriter.write(buf.slice(i, buf.length)).catch(console.error);
- }
+
+ const writeStream: WritableStream<any> = await wt.createUnidirectionalStream({sendOrder: 1});
+ const writer = writeStream.getWriter();
+ writer.write(buf);
+ writer.releaseLock();
+ writeStream.close();
+
+ // todo old dgram code
+ // const dgramLn = wt.datagrams.maxDatagramSize;
+ // const bufLeftoverLn = (buf.length % dgramLn);
+ // const bufRoundLn = buf.length - bufLeftoverLn;
+ // let i = 0;
+ // while (i < bufRoundLn)
+ // {
+ //  const i_next = i + dgramLn;
+ //  dgramWriter.write(buf.slice(i, i_next)).catch(console.error);
+ //  i = i_next;
+ // }
+ // if (bufLeftoverLn)
+ // {
+ //  dgramWriter.write(buf.slice(i, buf.length)).catch(console.error);
+ // }
 }
 
 async function

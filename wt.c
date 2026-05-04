@@ -182,11 +182,11 @@ struct h3_header_frame
 #define WtStreamIsUni(Id) ((Id) & 0x02)
 #define WtStreamIsClientInitiated(Id) (!((Id) & 0x01))
 
-typedef struct wt_server wt_server;
+typedef struct wt_srv wt_srv;
 typedef struct wt_con wt_con;
 typedef struct wt_stream wt_stream;
 
-struct wt_server
+struct wt_srv
 {
  HQUIC Listener;
  QUIC_BUFFER Alpn;
@@ -231,11 +231,9 @@ struct wt_con
  lsqpack_dec Dec;
  lsqpack_enc Enc;
 
- wt_server *Srv;
+ wt_srv *Srv;
  wt_con *Next;
  wt_con *Prev;
- wt_stream *FirstStream;
- wt_stream *LastStream;
  wt_req *FreeReq;
 
  // for sending settings response
@@ -272,6 +270,7 @@ struct varint_pair_decoder
 struct wt_stream
 {
  uint64_t Id;
+ HQUIC QStream;
 
  varint_pair_decoder StreamHeader;
  varint_pair_decoder CurFrameHeader;
@@ -951,7 +950,7 @@ ReqConnectValidate(wt_req *Req)
 }
 
 static void
-ConAlloc(wt_server *Srv, wt_con *Con, ar * Ar)
+ConAlloc(wt_srv *Srv, wt_con *Con, ar * Ar)
 {
  Con->RwMtx = OsRwMutexAlloc();
  Con->Ar = Ar;
@@ -983,7 +982,6 @@ StreamPush(size_t Id, wt_con *Con, wt_stream *Stream)
  {
   Stream->Id = Id;
   Stream->Con = Con;
-  DLLPushFront(Con->FirstStream, Con->LastStream, Stream);
  }
  OsRwMutexDrop(Con->RwMtx, 1);
 }
@@ -993,7 +991,6 @@ StreamFree(wt_stream *Stream)
 {
  OsRwMutexTake(Stream->Con->RwMtx, 1);
  {
-  DLLRemove(Stream->Con->FirstStream, Stream->Con->LastStream, Stream);
   if (Stream->Req)
   {
    SLLStackPush(Stream->Con->FreeReq, Stream->Req);
@@ -1273,6 +1270,26 @@ WtUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  return QUIC_STATUS_SUCCESS;
 }
 
+static HQUIC
+UnidiStreamOpen(QUIC_API_TABLE *MsQuic, HQUIC QCon, QUIC_STREAM_CALLBACK_HANDLER Cb, void *CbCtx)
+{
+ HQUIC QStream = 0;
+ if (QUIC_SUCCEEDED(MsQuic->StreamOpen(QCon, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, Cb, CbCtx, &QStream)))
+ {
+  if (QUIC_FAILED(MsQuic->StreamStart(QStream, QUIC_STREAM_START_FLAG_NONE)))
+  {
+   MsQuic->StreamClose(QStream);
+   QStream = 0;
+  }
+ }
+ else
+ {
+  QStream = 0;
+ }
+ return QStream;
+}
+
+
 static QUIC_STATUS
 WtBidiWtRecv(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
@@ -1493,30 +1510,21 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
   printf("[conn][%p] Connected\n", QCon);
 
   OsRwMutexTake(Con->RwMtx, 1);
-  {
-   Con->QCon = QCon;
-   wt_stream *Stream = ArPush(Con->Ar, wt_stream, 1);
-   StreamPush(0, Con, Stream);
-   if (QUIC_SUCCEEDED(MsQuic->StreamOpen(QCon, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, WtUnidiCb, Stream, &Con->ControlStream)))
-   {
-    if (QUIC_SUCCEEDED(MsQuic->StreamStart(Con->ControlStream, QUIC_STREAM_START_FLAG_NONE)))
-    {
-     MsQuic->ConnectionSendResumptionTicket(QCon, QUIC_SEND_RESUMPTION_FLAG_NONE, 0, NULL);
-    }
-    else
-    {
-     StreamFree(Stream);
-     MsQuic->StreamClose(Con->ControlStream);
-     ConnectionShutdown(MsQuic, QCon, H3ErrInternalError);
-    }
-   }
-   else
-   {
-    StreamFree(Stream);
-    ConnectionShutdown(MsQuic, QCon, H3ErrInternalError);
-   }
-  }
+  Con->QCon = QCon;
+  wt_stream *Stream = ArPush(Con->Ar, wt_stream, 1);
   OsRwMutexDrop(Con->RwMtx, 1);
+  StreamPush(0, Con, Stream);
+  Stream->QStream = UnidiStreamOpen(MsQuic, QCon, WtUnidiCb, Stream);
+  Con->ControlStream = Stream->QStream;
+  if (Stream->QStream)
+  {
+   MsQuic->ConnectionSendResumptionTicket(QCon, QUIC_SEND_RESUMPTION_FLAG_NONE, 0, NULL);
+  }
+  else
+  {
+   StreamFree(Stream);
+   ConnectionShutdown(MsQuic, QCon, H3ErrInternalError);
+  }
   break;
  }
  case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
@@ -1599,7 +1607,7 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
 static QUIC_STATUS
 WtListenCb(HQUIC Listener, void *Ctx, QUIC_LISTENER_EVENT *Event, void *ConCb, void *ConCbCtx)
 {
- wt_server *Srv = (wt_server *)Ctx;
+ wt_srv *Srv = (wt_srv *)Ctx;
  QUIC_STATUS Status = QUIC_STATUS_NOT_SUPPORTED;
  switch (Event->Type)
  {
@@ -1630,11 +1638,10 @@ WtListenCb(HQUIC Listener, void *Ctx, QUIC_LISTENER_EVENT *Event, void *ConCb, v
 // }
 
 // The arena given is owned by the server
-static wt_server *
-WtInit(ar *Ar)
+static void
+WtInit(ar *Ar, wt_srv *Srv)
 {
  ar_tmp Pos = ArTmpGet(Ar);
- wt_server *Srv = ArPush(Ar, wt_server, 1);
  Srv->Ar = Ar;
  QUIC_STATUS Status = QUIC_STATUS_SUCCESS;
  uint32_t Succeeded = 0;
@@ -1666,6 +1673,8 @@ WtInit(ar *Ar)
     Settings.IsSet.ConnFlowControlWindow = TRUE;
     Settings.KeepAliveIntervalMs = 10000;
     Settings.IsSet.KeepAliveIntervalMs = TRUE;
+    Settings.SendBufferingEnabled = 0;
+    Settings.IsSet.SendBufferingEnabled = TRUE;
 
     QUIC_CERTIFICATE_HASH Thumbprint = {0};
     DecodeHexBuffer(CertThumbprint, sizeof(Thumbprint.ShaHash), Thumbprint.ShaHash);
@@ -1702,26 +1711,21 @@ WtInit(ar *Ar)
   printf("MsQuicOpen2 failed, 0x%x!\n", Status);
  }
 
- if (Succeeded)
- {
-  return Srv;
- }
- else
+ if (!Succeeded)
  {
   ArTmpEnd(Pos);
-  return 0;
  }
 }
 
 static uint32_t
-WtListen(wt_server *Srv, uint16_t Port, QUIC_LISTENER_CALLBACK_HANDLER ListenCb)
+WtListen(wt_srv *Srv, uint16_t Port, QUIC_LISTENER_CALLBACK_HANDLER ListenCb, void *ListenCbCtx)
 {
  uint32_t Succeeded = 0;
  QUIC_STATUS Status = QUIC_STATUS_SUCCESS;
  QUIC_ADDR Address = {0};
  QuicAddrSetFamily(&Address, QUIC_ADDRESS_FAMILY_UNSPEC);
  QuicAddrSetPort(&Address, Port);
- if (QUIC_SUCCEEDED(Status = Srv->MsQuic->ListenerOpen(Srv->Registration, ListenCb, Srv, &Srv->Listener)))
+ if (QUIC_SUCCEEDED(Status = Srv->MsQuic->ListenerOpen(Srv->Registration, ListenCb, ListenCbCtx, &Srv->Listener)))
  {
   if (QUIC_SUCCEEDED(Status = Srv->MsQuic->ListenerStart(Srv->Listener, &Srv->Alpn, 1, &Address)))
   {
@@ -1740,7 +1744,7 @@ WtListen(wt_server *Srv, uint16_t Port, QUIC_LISTENER_CALLBACK_HANDLER ListenCb)
 }
 
 static void
-WtClose(wt_server *Srv)
+WtClose(wt_srv *Srv)
 {
  if (Srv && Srv->MsQuic)
  {
