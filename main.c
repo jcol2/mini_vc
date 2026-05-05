@@ -288,6 +288,14 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        OutStream->Stream.QStream = UnidiStreamOpen(MsQuic, MyConNode->Con.QCon, MyUnidiCb, OutStream);
        if (OutStream->Stream.QStream)
        {
+        uint64_t SessionId = OutStream->MyCon->Con.SessionStream->Id;
+        char TmpDat[32] = {0};
+        a8 UnidiHeader = A8(TmpDat, sizeof(TmpDat));
+        a8 UnidiWriter = UnidiHeader;
+        A8WriteVarInt(&UnidiWriter, H3StreamUniWebtransportStream);
+        A8WriteVarInt(&UnidiWriter, SessionId);
+
+        MyStreamSendChunk(MsQuic, OutStream, UnidiHeader.Mem, UnidiHeader.Ln - UnidiWriter.Ln, QUIC_SEND_FLAG_NONE);
         MyStreamSendChunk(MsQuic, OutStream, FrameHeaderBuf->Mem, FrameHeaderBuf->Ln, QUIC_SEND_FLAG_NONE);
        }
        else
@@ -346,12 +354,14 @@ MyConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event)
  if (Event->Type == QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED)
  {
   MyStream = MyInStreamPush(MyCon);
+  WtConCb(QCon, (void *)&MyCon->Con, Event, (void *)MyUnidiCb, (void *)MyBidiCb, (void *)MyStream);
  }
  else if (Event->Type == QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE)
  {
+  WtConCb(QCon, (void *)&MyCon->Con, Event, (void *)MyUnidiCb, (void *)MyBidiCb, (void *)MyStream);
   MyConFree(MyCon);
  }
- return WtConCb(QCon, (void *)&MyCon->Con, Event, (void *)MyUnidiCb, (void *)MyBidiCb, (void *)MyStream);
+ return QUIC_STATUS_SUCCESS;
 }
 
 static QUIC_STATUS
