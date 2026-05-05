@@ -1,12 +1,19 @@
 #include "wt.c"
 
-typedef struct u64_buf u64_buf;
-struct u64_buf
+typedef struct frame_header frame_header;
+struct frame_header
+{
+ uint32_t TrackId;
+ uint64_t FrameId;
+};
+
+typedef struct frame_header_buf frame_header_buf;
+struct frame_header_buf
 {
  union
  {
-  uint8_t Mem[sizeof(uint64_t)];
-  uint64_t Val;
+  uint8_t Mem[sizeof(frame_header)];
+  frame_header Header;
  };
  uint8_t Ln;
 };
@@ -55,7 +62,7 @@ struct frame_chunk
 struct my_stream
 {
  uint32_t IsInStream;
- u64_buf FrameId;
+ frame_header_buf FrameHeader;
  // uint64_t TimeStamp;
  // uint64_t SequenceNumber;
  // uint8_t Flags;
@@ -70,7 +77,7 @@ struct my_stream
  frame_chunk *LastChunk;
 };
 
-#define U64BufIsReady(U64Buf) ((U64Buf)->Ln == sizeof((U64Buf)->Mem))
+#define FrameHeaderIsReady(U64Buf) ((U64Buf)->Ln == sizeof((U64Buf)->Mem))
 
 static my_srv *
 MySrvAlloc()
@@ -224,7 +231,7 @@ static QUIC_STATUS
 MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
  my_stream *MyStream = Ctx;
- u64_buf *FrameId = &MyStream->FrameId;
+ frame_header_buf *FrameHeaderBuf = &MyStream->FrameHeader;
  QUIC_API_TABLE *MsQuic = MyStream->Stream.Con->Srv->MsQuic;
  WtUnidiCb(QStream, &MyStream->Stream, Event);
 
@@ -237,17 +244,17 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   {
 
    // buffer input
-   if (!U64BufIsReady(FrameId))
+   if (!FrameHeaderIsReady(FrameHeaderBuf))
    {
     for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
     {
      QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
-     uint8_t CpyLn = (uint8_t)Min(sizeof(FrameId->Mem) - FrameId->Ln, Buf->Length);
-     memcpy(FrameId->Mem + FrameId->Ln, Buf->Buffer, CpyLn);
-     FrameId->Ln += CpyLn;
+     uint8_t CpyLn = (uint8_t)Min(sizeof(FrameHeaderBuf->Mem) - FrameHeaderBuf->Ln, Buf->Length);
+     memcpy(FrameHeaderBuf->Mem + FrameHeaderBuf->Ln, Buf->Buffer, CpyLn);
+     FrameHeaderBuf->Ln += CpyLn;
      Buf->Buffer += CpyLn;
      Buf->Length -= CpyLn;
-     if (U64BufIsReady(FrameId))
+     if (FrameHeaderIsReady(FrameHeaderBuf))
      {
       break;
      }
@@ -255,7 +262,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
    }
 
    // if stream has frame id, then fan out
-   if (U64BufIsReady(FrameId))
+   if (FrameHeaderIsReady(FrameHeaderBuf))
    {
     for (my_con *MyConNode = MyStream->MyCon->MySrv->First; MyConNode; MyConNode = MyConNode->Next)
     {
@@ -266,7 +273,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
       my_stream *OutStream = 0;
       for (my_stream *MyStreamNode = MyConNode->FirstOut; MyStreamNode; MyStreamNode = MyStreamNode->Next)
       {
-       if (U64BufIsReady(&MyStreamNode->FrameId) && MyStreamNode->FrameId.Val == FrameId->Val)
+       if (FrameHeaderIsReady(&MyStreamNode->FrameHeader) && MyStreamNode->FrameHeader.Header.FrameId == FrameHeaderBuf->Header.FrameId)
        {
         OutStream = MyStreamNode;
         break;
@@ -281,7 +288,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        OutStream->Stream.QStream = UnidiStreamOpen(MsQuic, MyConNode->Con.QCon, MyUnidiCb, OutStream);
        if (OutStream->Stream.QStream)
        {
-        MyStreamSendChunk(MsQuic, OutStream, FrameId->Mem, FrameId->Ln, QUIC_SEND_FLAG_NONE);
+        MyStreamSendChunk(MsQuic, OutStream, FrameHeaderBuf->Mem, FrameHeaderBuf->Ln, QUIC_SEND_FLAG_NONE);
        }
        else
        {

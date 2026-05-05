@@ -4,8 +4,15 @@ let dgramWriter: WritableStreamDefaultWriter<any>;
 
 async function HandleChunk(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): Promise<void>
 {
- const buf = new Uint8Array(chunk.byteLength);
- chunk.copyTo(buf);
+ const headerLn = 12;
+ const buf = new Uint8Array(headerLn + chunk.byteLength);
+ chunk.copyTo(buf.subarray(headerLn));
+ const view = new DataView(buf.buffer);
+ // set track id
+ view.setUint32(0, 0xdeadbeef, true);
+ // set frame id
+ view.setUint32(4, 0xdeadbeef, true);
+ view.setUint32(8, 0, true);
 
  const writeStream: WritableStream<any> = await wt.createUnidirectionalStream({sendOrder: 1});
  const writer = writeStream.getWriter();
