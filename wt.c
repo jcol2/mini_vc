@@ -687,6 +687,7 @@ H3HeaderEncode(lsqpack_enc *Enc, uint64_t StreamId, h3_header *Headers, size_t H
 static void
 StreamSendShutdown(QUIC_API_TABLE *MsQuic, HQUIC Stream, int32_t StatusCode)
 {
+ printf("[STRM][%p] STREAM SHUTDOWN CALLED\n", Stream);
  MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND | QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE, StatusCode);
 }
 
@@ -1267,6 +1268,28 @@ WtUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
    } break;
   }
  }
+ else if (Event->Type == QUIC_STREAM_EVENT_START_COMPLETE)
+ {
+  Stream->QStream = QStream;
+
+  // assign stream id for outgoing streams for logging
+  // client initiated streams must wait to assign stream id
+  // todo change ^^^?
+  uint64_t StreamId = 0;
+  uint32_t StreamIdSize = sizeof(Stream->Id);
+  if (QUIC_SUCCEEDED(MsQuic->GetParam(QStream, QUIC_PARAM_STREAM_ID, &StreamIdSize, &StreamId)))
+  {
+   if (!WtStreamIsClientInitiated(StreamId))
+   {
+    Stream->Id = StreamId;
+   }
+  }
+  else
+  {
+   ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrInternalError);
+  }
+  printf("[STRM][%p][%zd] Start complete - peer accepted: %d\n", Stream->QStream, Stream->Id, Event->START_COMPLETE.PeerAccepted);
+ }
  return QUIC_STATUS_SUCCESS;
 }
 
@@ -1274,15 +1297,7 @@ static HQUIC
 UnidiStreamOpen(QUIC_API_TABLE *MsQuic, HQUIC QCon, QUIC_STREAM_CALLBACK_HANDLER Cb, void *CbCtx)
 {
  HQUIC QStream = 0;
- if (QUIC_SUCCEEDED(MsQuic->StreamOpen(QCon, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, Cb, CbCtx, &QStream)))
- {
-  if (QUIC_FAILED(MsQuic->StreamStart(QStream, QUIC_STREAM_START_FLAG_NONE)))
-  {
-   MsQuic->StreamClose(QStream);
-   QStream = 0;
-  }
- }
- else
+ if (QUIC_FAILED(MsQuic->StreamOpen(QCon, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, Cb, CbCtx, &QStream)))
  {
   QStream = 0;
  }
@@ -1515,6 +1530,7 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
   OsRwMutexDrop(Con->RwMtx, 1);
   StreamPush(0, Con, Stream);
   Stream->QStream = UnidiStreamOpen(MsQuic, QCon, WtUnidiCb, Stream);
+  MsQuic->StreamStart(Stream->QStream, QUIC_STREAM_START_FLAG_INDICATE_PEER_ACCEPT);
   Con->ControlStream = Stream->QStream;
   if (Stream->QStream)
   {
@@ -1558,7 +1574,7 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
  }
  case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
  {
-  printf("[strm][%p] Peer started\n", Event->PEER_STREAM_STARTED.Stream);
+  printf("[STRM][%p] Peer started\n", Event->PEER_STREAM_STARTED.Stream);
 
   if (Event->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL)
   {

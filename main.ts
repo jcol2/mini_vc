@@ -1,4 +1,5 @@
-import MainWorkerStr from "./main_worker.txt";
+import WorkerVcapStr from "./worker_vcap.txt";
+import WorkerRecvStr from "./worker_recv.txt";
 
 
 
@@ -229,9 +230,12 @@ Main(): Promise<void>
   const processor = new MediaStreamTrackProcessor({track});
   const readable = processor.readable;
 
-  const blob = new Blob([MainWorkerStr], {type: "text/javascript"});
-  const worker = new Worker(window.URL.createObjectURL(blob));
-  worker.postMessage({ readable }, [readable]);
+  const vcapBlob = new Blob([WorkerVcapStr], {type: "text/javascript"});
+  const vcapWorker = new Worker(window.URL.createObjectURL(vcapBlob), {name: "worker_vcap"});
+  const recvBlob = new Blob([WorkerRecvStr], {type: "text/javascript"});
+  const recvWorker = new Worker(window.URL.createObjectURL(recvBlob), {name: "worker_recv"});
+  vcapWorker.postMessage({ readable }, [readable]);
+  recvWorker.postMessage({}, []);
  });
 }
 

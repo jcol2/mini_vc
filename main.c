@@ -219,7 +219,11 @@ MyStreamSendChunk(QUIC_API_TABLE *MsQuic, my_stream *MyStream, char *ArrMem, siz
  Chunk->Ln = Min(ArrLn, sizeof(Chunk->Mem));
  memcpy(Chunk->Mem, ArrMem, Chunk->Ln);
  Chunk->Buf = (QUIC_BUFFER){.Buffer = Chunk->Mem, .Length = (uint32_t)Chunk->Ln};
- if (QUIC_FAILED(MsQuic->StreamSend(MyStream->Stream.QStream, &Chunk->Buf, 1, Flags, (void *)Chunk)))
+ if (QUIC_SUCCEEDED(MsQuic->StreamSend(MyStream->Stream.QStream, &Chunk->Buf, 1, Flags, (void *)Chunk)))
+ {
+  printf("[CHUNK][%p][%zd] Send success\n", MyStream->Stream.QStream, MyStream->Stream.Id);
+ }
+ else
  {
   Ret = 0;
   printf("[CHUNK] Send failed\n");
@@ -264,10 +268,11 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
    // if stream has frame id, then fan out
    if (FrameHeaderIsReady(FrameHeaderBuf))
    {
+    OsRwMutexTake(MyStream->MyCon->MySrv->RwMtx, 0);
     for (my_con *MyConNode = MyStream->MyCon->MySrv->First; MyConNode; MyConNode = MyConNode->Next)
     {
-     // todo only send when not this connection
-     // if (MyConNode != MyStream->MyCon)
+     OsRwMutexTake(MyStream->MyCon->RwMtx, 0);
+     if (MyConNode != MyStream->MyCon)
      {
       // find stream with FrameId
       my_stream *OutStream = 0;
@@ -283,6 +288,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
       if (!OutStream)
       {
        OutStream = MyOutStreamPush(MyConNode);
+       OutStream->FrameHeader = *FrameHeaderBuf;
 
        // send the frame id
        OutStream->Stream.QStream = UnidiStreamOpen(MsQuic, MyConNode->Con.QCon, MyUnidiCb, OutStream);
@@ -295,8 +301,8 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
         A8WriteVarInt(&UnidiWriter, H3StreamUniWebtransportStream);
         A8WriteVarInt(&UnidiWriter, SessionId);
 
-        MyStreamSendChunk(MsQuic, OutStream, UnidiHeader.Mem, UnidiHeader.Ln - UnidiWriter.Ln, QUIC_SEND_FLAG_NONE);
-        MyStreamSendChunk(MsQuic, OutStream, FrameHeaderBuf->Mem, FrameHeaderBuf->Ln, QUIC_SEND_FLAG_NONE);
+        MyStreamSendChunk(MsQuic, OutStream, UnidiHeader.Mem, UnidiHeader.Ln - UnidiWriter.Ln, QUIC_SEND_FLAG_START | QUIC_SEND_FLAG_DELAY_SEND);
+        MyStreamSendChunk(MsQuic, OutStream, FrameHeaderBuf->Mem, FrameHeaderBuf->Ln, QUIC_SEND_FLAG_NONE | QUIC_SEND_FLAG_DELAY_SEND);
        }
        else
        {
@@ -305,28 +311,49 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
       }
 
       // send the buffers
-      QUIC_SEND_FLAGS SendFlags = HasFin ? QUIC_SEND_FLAG_FIN : QUIC_SEND_FLAG_NONE;
-      for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
+      size_t BufCnt = Event->RECEIVE.BufferCount;
+      for (size_t I = 0; I < BufCnt; ++I)
       {
+       QUIC_SEND_FLAGS SendFlags = HasFin && I == (BufCnt - 1) ? QUIC_SEND_FLAG_FIN : QUIC_SEND_FLAG_NONE;
+       if (I < (BufCnt - 1))
+       {
+        SendFlags |= QUIC_SEND_FLAG_DELAY_SEND;
+       }
+       
        QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
        MyStreamSendChunk(MsQuic, OutStream, Buf->Buffer, Buf->Length, SendFlags);
       }
      }
+     OsRwMutexDrop(MyStream->MyCon->RwMtx, 0);
     }
+    OsRwMutexDrop(MyStream->MyCon->MySrv->RwMtx, 0);
    }
   }
  }
  else if (Event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE)
  {
-  printf("[STRM] Peer stream shutdown\n");
+  // todo qstream in stream null for some reason
+  printf("[STRM][%p][%zd] Peer stream shutdown, remotely: %d, by app: %d\n", QStream, MyStream->Stream.Id, Event->SHUTDOWN_COMPLETE.ConnectionClosedRemotely, Event->SHUTDOWN_COMPLETE.ConnectionShutdownByApp);
   MyStreamFree(MyStream);
  }
  else if (Event->Type == QUIC_STREAM_EVENT_SEND_COMPLETE)
  {
   frame_chunk *Chunk = Event->SEND_COMPLETE.ClientContext;
-  FrameChunkFree(MyStream->MyCon, Chunk);
-  printf("[CHUNK] Freed chunk\n");
+  if (Chunk)
+  {
+   FrameChunkFree(MyStream->MyCon, Chunk);
+   printf("[CHUNK] Freed chunk\n");
+  }
  }
+ else if (Event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED)
+ {
+  printf("[STRM][%p][%zd] PEER RECEIVE ABORTED\n", QStream, MyStream->Stream.Id);
+ }
+ else if (Event->Type == QUIC_STREAM_EVENT_RECEIVE_BUFFER_NEEDED)
+ {
+  printf("[STRM][%p][%zd] RECEIVE BUFFER NEEDED\n", QStream, MyStream->Stream.Id);
+ }
+
  
  return QUIC_STATUS_SUCCESS;
 }
@@ -354,11 +381,12 @@ MyConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event)
  if (Event->Type == QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED)
  {
   MyStream = MyInStreamPush(MyCon);
-  WtConCb(QCon, (void *)&MyCon->Con, Event, (void *)MyUnidiCb, (void *)MyBidiCb, (void *)MyStream);
  }
- else if (Event->Type == QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE)
+
+ WtConCb(QCon, (void *)&MyCon->Con, Event, (void *)MyUnidiCb, (void *)MyBidiCb, (void *)MyStream);
+
+ if (Event->Type == QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE)
  {
-  WtConCb(QCon, (void *)&MyCon->Con, Event, (void *)MyUnidiCb, (void *)MyBidiCb, (void *)MyStream);
   MyConFree(MyCon);
  }
  return QUIC_STATUS_SUCCESS;
