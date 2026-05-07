@@ -1,11 +1,15 @@
 #include "wt.c"
 
+#pragma pack(push, 1)
 typedef struct frame_header frame_header;
 struct frame_header
 {
- uint32_t TrackId;
- uint64_t FrameId;
+ uint32_t FrameId;
+ uint32_t TimestampMs;
+ uint8_t TrackId;
+ uint8_t Metadata;
 };
+#pragma pack(pop)
 
 typedef struct frame_header_buf frame_header_buf;
 struct frame_header_buf

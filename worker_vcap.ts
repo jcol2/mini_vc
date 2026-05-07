@@ -5,15 +5,19 @@ let run = 1;
 
 async function HandleChunk(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): Promise<void>
 {
- const headerLn = 12;
+ const isKey = chunk.type == "key" ? 1 : 0;
+ const headerLn = 10;
  const buf = new Uint8Array(headerLn + chunk.byteLength);
  chunk.copyTo(buf.subarray(headerLn));
  const view = new DataView(buf.buffer);
- // set track id
- view.setUint32(0, 0xdeadbeef, true);
  // set frame id
+ view.setUint32(0, 0xdeadbeef, true);
+ // set timestamp
  view.setUint32(4, 0xdeadbeef, true);
- view.setUint32(8, 0, true);
+ // set track id
+ view.setUint8(8, 0);
+ // set metadata
+ view.setUint8(9, isKey);
 
  const writeStream: WritableStream<any> = await wt.createUnidirectionalStream({sendOrder: 1});
  const writer = writeStream.getWriter();

@@ -5,13 +5,15 @@
   var dgramWriter;
   var run = 1;
   async function HandleChunk(chunk, metadata) {
-    const headerLn = 12;
+    const isKey = chunk.type == "key" ? 1 : 0;
+    const headerLn = 10;
     const buf = new Uint8Array(headerLn + chunk.byteLength);
     chunk.copyTo(buf.subarray(headerLn));
     const view = new DataView(buf.buffer);
     view.setUint32(0, 3735928559, true);
     view.setUint32(4, 3735928559, true);
-    view.setUint32(8, 0, true);
+    view.setUint8(8, 0);
+    view.setUint8(9, isKey);
     const writeStream = await wt.createUnidirectionalStream({ sendOrder: 1 });
     const writer = writeStream.getWriter();
     writer.write(buf);

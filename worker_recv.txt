@@ -2,17 +2,46 @@
 (() => {
   // worker_recv.ts
   var wt;
+  var jitterBufLn = 256;
+  var jitterBufMask = jitterBufLn - 1;
+  var jitterBuf = new Array(jitterBufLn).fill(null).map(() => ({ frame: null, timestamp: 0, frameId: 0, metadata: 0 }));
   async function HandleData(receiveStream) {
     const reader = receiveStream.getReader();
+    const packetBuf = [];
+    let catBufLn = 0;
     for (; ; ) {
       console.log("[recv] strm wait");
       const { done, value } = await reader.read();
       if (done) {
         break;
       }
-      console.log(value);
+      packetBuf.push(value);
+      catBufLn += value.length;
     }
+    let catBuf = new Uint8Array(catBufLn);
+    let catBufOff = 0;
+    for (let I = 0; I < packetBuf.length; ++I) {
+      const buf = packetBuf[I];
+      catBuf.set(buf, catBufOff);
+      catBufOff += buf.length;
+    }
+    const catView = new DataView(catBuf.buffer);
+    const frameId = catView.getUint32(0, true);
+    const timestampMs = catView.getUint32(4, true);
+    const trackId = catView.getUint8(8);
+    const metadata = catView.getUint8(9);
+    const jitterBufEl = jitterBuf[frameId & jitterBufMask];
+    jitterBufEl.frame = catBuf;
+    jitterBufEl.frameId = frameId;
+    jitterBufEl.timestamp = timestampMs;
+    jitterBufEl.metadata = metadata;
+    jitterBufEl.frame = catBuf;
+    console.log(jitterBufEl);
     console.log("[recv] done with strm");
+  }
+  function HandleDecoderOutput() {
+  }
+  function HandleDecoderError() {
   }
   async function HandleMsg(Msg) {
     const hashBytes = Uint8Array.fromHex("df823a1cdf02b7f464865756ad671bf4a9466587f48e9574e7bab1cbb1b9b9e8");
@@ -30,6 +59,14 @@
     );
     await wt.ready;
     const reader = wt.incomingUnidirectionalStreams.getReader();
+    const decoder = new VideoDecoder({ output: HandleDecoderOutput, error: HandleDecoderError });
+    decoder.configure({
+      codec: "vp8",
+      optimizeForLatency: true,
+      hardwareAcceleration: "prefer-hardware"
+      // codedHeight: 720,
+      // codedWidth: 1280,
+    });
     for (; ; ) {
       console.log("[recv] wait");
       const { done, value } = await reader.read();
