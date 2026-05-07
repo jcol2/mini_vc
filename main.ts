@@ -213,6 +213,9 @@ ElQuery(str: string): Element | null
 async function
 Main(): Promise<void>
 {
+ const recvCanvas: HTMLCanvasElement = ElQuery("#recv_canvas") as HTMLCanvasElement;
+ const offscreenCanvas = recvCanvas.transferControlToOffscreen();
+
  const screenCapBtn = ElQuery("#screen_cap_btn");
  screenCapBtn?.addEventListener("click", async (E) => {
   const capStream = await navigator.mediaDevices.getDisplayMedia();
@@ -235,7 +238,7 @@ Main(): Promise<void>
   const recvBlob = new Blob([WorkerRecvStr], {type: "text/javascript"});
   const recvWorker = new Worker(window.URL.createObjectURL(recvBlob), {name: "worker_recv"});
   vcapWorker.postMessage({ readable }, [readable]);
-  recvWorker.postMessage({}, []);
+  recvWorker.postMessage({ canvas: offscreenCanvas}, [offscreenCanvas]);
  });
 }
 

@@ -60,8 +60,6 @@
         const keyFrame = frameCounter % 150 == 0;
         encoder.encode(value, { keyFrame });
         frameCounter++;
-        console.log("[vcap] Early exit");
-        return;
       }
       value.close();
     }

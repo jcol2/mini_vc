@@ -8,6 +8,9 @@ interface jitter_buf_el
 };
 
 let wt: WebTransport;
+let decoder: VideoDecoder;
+let canvas: OffscreenCanvas;
+let ctx: OffscreenCanvasRenderingContext2D;
 
 const jitterBufLn = 256;
 const jitterBufMask = jitterBufLn - 1;
@@ -22,7 +25,7 @@ HandleData(receiveStream: any)
  let catBufLn = 0;
  for (;;)
  {
-  console.log("[recv] strm wait");
+  // console.log("[recv] strm wait");
   const {done, value}: { done: boolean, value: Uint8Array} = await reader.read();
   if (done)
   {
@@ -31,6 +34,7 @@ HandleData(receiveStream: any)
   packetBuf.push(value);
   catBufLn += value.length;
  }
+ // console.log("[recv] my buf ln", catBufLn);
 
  // cat stream chunks
  let catBuf = new Uint8Array(catBufLn);
@@ -55,25 +59,39 @@ HandleData(receiveStream: any)
  jitterBufEl.metadata = metadata;
  jitterBufEl.frame = catBuf;
  
- console.log(jitterBufEl);
- console.log("[recv] done with strm");
+ const frameHeaderLn = 10;
+ const videoChunk = new EncodedVideoChunk({
+  data: new DataView(catBuf.buffer, frameHeaderLn), 
+  timestamp: timestampMs, 
+  type: metadata ? "key" : "delta",
+  // todo specify duration
+ });
+ decoder.decode(videoChunk);
+ // console.log(jitterBufEl);
+ // console.log("[recv] done with strm");
 }
 
 function
-HandleDecoderOutput()
+HandleDecoderOutput(videoFrame: VideoFrame)
 {
-
+ canvas.width = videoFrame.displayWidth;
+ canvas.height = videoFrame.displayHeight;
+ ctx.drawImage(videoFrame, 0, 0);
+ videoFrame.close();
 }
 
 function
-HandleDecoderError()
+HandleDecoderError(err: Error)
 {
-
+ console.error(err);
 }
 
 async function
-HandleMsg(Msg: { data: any})
+HandleMsg(msg: { data: { canvas: OffscreenCanvas }})
 {
+ canvas = msg.data.canvas;
+ ctx = canvas.getContext("2d") as OffscreenCanvasRenderingContext2D;
+
  // init wt
  const hashBytes: Uint8Array = Uint8Array.fromHex(CertFingerprint);
  wt = new WebTransport(
@@ -92,7 +110,7 @@ HandleMsg(Msg: { data: any})
  const reader = wt.incomingUnidirectionalStreams.getReader();
 
  // init decoder
- const decoder = new VideoDecoder({output: HandleDecoderOutput, error: HandleDecoderError});
+ decoder = new VideoDecoder({output: HandleDecoderOutput, error: HandleDecoderError});
  decoder.configure({
   codec: "vp8",
   optimizeForLatency: true,
@@ -103,7 +121,7 @@ HandleMsg(Msg: { data: any})
 
  for (;;)
  {
-  console.log("[recv] wait");
+  // console.log("[recv] wait");
   const {done, value} = await reader.read();
   if (done)
   {

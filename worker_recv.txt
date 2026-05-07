@@ -2,6 +2,9 @@
 (() => {
   // worker_recv.ts
   var wt;
+  var decoder;
+  var canvas;
+  var ctx;
   var jitterBufLn = 256;
   var jitterBufMask = jitterBufLn - 1;
   var jitterBuf = new Array(jitterBufLn).fill(null).map(() => ({ frame: null, timestamp: 0, frameId: 0, metadata: 0 }));
@@ -10,7 +13,6 @@
     const packetBuf = [];
     let catBufLn = 0;
     for (; ; ) {
-      console.log("[recv] strm wait");
       const { done, value } = await reader.read();
       if (done) {
         break;
@@ -36,14 +38,27 @@
     jitterBufEl.timestamp = timestampMs;
     jitterBufEl.metadata = metadata;
     jitterBufEl.frame = catBuf;
-    console.log(jitterBufEl);
-    console.log("[recv] done with strm");
+    const frameHeaderLn = 10;
+    const videoChunk = new EncodedVideoChunk({
+      data: new DataView(catBuf.buffer, frameHeaderLn),
+      timestamp: timestampMs,
+      type: metadata ? "key" : "delta"
+      // todo specify duration
+    });
+    decoder.decode(videoChunk);
   }
-  function HandleDecoderOutput() {
+  function HandleDecoderOutput(videoFrame) {
+    canvas.width = videoFrame.displayWidth;
+    canvas.height = videoFrame.displayHeight;
+    ctx.drawImage(videoFrame, 0, 0);
+    videoFrame.close();
   }
-  function HandleDecoderError() {
+  function HandleDecoderError(err) {
+    console.error(err);
   }
-  async function HandleMsg(Msg) {
+  async function HandleMsg(msg) {
+    canvas = msg.data.canvas;
+    ctx = canvas.getContext("2d");
     const hashBytes = Uint8Array.fromHex("df823a1cdf02b7f464865756ad671bf4a9466587f48e9574e7bab1cbb1b9b9e8");
     wt = new WebTransport(
       "https://127.0.0.1:4567/",
@@ -59,7 +74,7 @@
     );
     await wt.ready;
     const reader = wt.incomingUnidirectionalStreams.getReader();
-    const decoder = new VideoDecoder({ output: HandleDecoderOutput, error: HandleDecoderError });
+    decoder = new VideoDecoder({ output: HandleDecoderOutput, error: HandleDecoderError });
     decoder.configure({
       codec: "vp8",
       optimizeForLatency: true,
@@ -68,7 +83,6 @@
       // codedWidth: 1280,
     });
     for (; ; ) {
-      console.log("[recv] wait");
       const { done, value } = await reader.read();
       if (done) {
         break;

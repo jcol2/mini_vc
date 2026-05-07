@@ -18,6 +18,7 @@ async function HandleChunk(chunk: EncodedVideoChunk, metadata?: EncodedVideoChun
  view.setUint8(8, 0);
  // set metadata
  view.setUint8(9, isKey);
+ // console.log("[vcap] Sending length: ", buf.length);
 
  const writeStream: WritableStream<any> = await wt.createUnidirectionalStream({sendOrder: 1});
  const writer = writeStream.getWriter();
@@ -86,9 +87,6 @@ HandleMsg(Msg: { data: { readable: ReadableStreamDefaultReader<VideoFrame | Audi
    const keyFrame = frameCounter % 150 == 0;
    encoder.encode(value, {keyFrame});
    frameCounter++;
-
-   console.log("[vcap] Early exit");
-   return;
   }
   value.close();
  }
