@@ -66,10 +66,9 @@ struct frame_chunk
 struct my_stream
 {
  uint32_t IsInStream;
+ // outgoing streams are mapped to an incoming stream
+ uint64_t OwningStreamId;
  frame_header_buf FrameHeader;
- // uint64_t TimeStamp;
- // uint64_t SequenceNumber;
- // uint8_t Flags;
 
  wt_stream Stream;
 
@@ -117,13 +116,21 @@ MyConAlloc(my_srv *MySrv)
 static void
 MyConFree(my_con *MyCon)
 {
- OsRwMutexTake(MyCon->MySrv->RwMtx, 1);
- DLLRemove(MyCon->MySrv->First, MyCon->MySrv->Last, MyCon);
- OsRwMutexDrop(MyCon->MySrv->RwMtx, 1);
+ rw_mtx MyConRwMtx = MyCon->RwMtx;
+ rw_mtx MySrvRwMtx = MyCon->MySrv->RwMtx;
+ OsRwMutexTake(MySrvRwMtx, 1);
+ OsRwMutexTake(MyConRwMtx, 1);
 
- OsRwMutexRelease(MyCon->RwMtx);
- ConFree(&MyCon->Con);
- ArRelease(MyCon->Ar);
+ {
+  DLLRemove(MyCon->MySrv->First, MyCon->MySrv->Last, MyCon);
+
+  ConFree(&MyCon->Con);
+  ArRelease(MyCon->Ar);
+ }
+
+ OsRwMutexDrop(MyConRwMtx, 1);
+ OsRwMutexRelease(MyConRwMtx);
+ OsRwMutexDrop(MySrvRwMtx, 1);
 }
 
 static my_stream *
@@ -220,6 +227,21 @@ FrameChunkFree(my_con *MyCon, frame_chunk *Chunk)
  OsRwMutexDrop(MyCon->RwMtx, 1);
 }
 
+static void
+StreamStatsGet(QUIC_API_TABLE *MsQuic, my_stream *MyStream)
+{
+ QUIC_STREAM_STATISTICS Stats = {0};
+ uint32_t StatsLn = sizeof(Stats);
+ if (QUIC_SUCCEEDED(MsQuic->GetParam(MyStream->Stream.QStream, QUIC_PARAM_STREAM_STATISTICS, &StatsLn, &Stats)))
+ {
+  printf("[CHUNK][%p][%zd][%d] HERES STATS\n", MyStream->Stream.QStream, MyStream->Stream.Id, GetCurrentThreadId());
+ }
+ else
+ {
+  printf("[CHUNK][%p][%zd] FAILED TO GET STATS\n", MyStream->Stream.QStream, MyStream->Stream.Id);
+ }
+}
+
 static uint32_t
 MyStreamSendChunk(QUIC_API_TABLE *MsQuic, my_stream *MyStream, char *ArrMem, size_t ArrLn, QUIC_SEND_FLAGS Flags)
 {
@@ -238,17 +260,6 @@ MyStreamSendChunk(QUIC_API_TABLE *MsQuic, my_stream *MyStream, char *ArrMem, siz
   if (Flags & QUIC_SEND_FLAG_FIN)
   {
    printf("[CHUNK][%p][%zd][%d] Send Length: %d\n", MyStream->Stream.QStream, MyStream->Stream.Id, GetCurrentThreadId(), MyStream->SendLn);
-
-   QUIC_STREAM_STATISTICS Stats = {0};
-   uint32_t StatsLn = sizeof(Stats);
-   if (QUIC_SUCCEEDED(MsQuic->GetParam(MyStream->Stream.QStream, QUIC_PARAM_STREAM_STATISTICS, &StatsLn, &Stats)))
-   {
-    printf("[CHUNK][%p][%zd][%d] HERES STATS\n", MyStream->Stream.QStream, MyStream->Stream.Id, GetCurrentThreadId());
-   }
-   else
-   {
-    printf("[CHUNK][%p][%zd] FAILED TO GET STATS\n", MyStream->Stream.QStream, MyStream->Stream.Id);
-   }
   }
  }
  else
@@ -302,11 +313,11 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
      OsRwMutexTake(MyStream->MyCon->RwMtx, 0);
      if (MyConNode != MyStream->MyCon)
      {
-      // find stream with FrameId
+      // find stream with owning stream id
       my_stream *OutStream = 0;
       for (my_stream *MyStreamNode = MyConNode->FirstOut; MyStreamNode; MyStreamNode = MyStreamNode->Next)
       {
-       if (FrameHeaderIsReady(&MyStreamNode->FrameHeader) && MyStreamNode->FrameHeader.Header.FrameId == FrameHeaderBuf->Header.FrameId)
+       if (FrameHeaderIsReady(&MyStreamNode->FrameHeader) && MyStreamNode->OwningStreamId == MyStream->Stream.Id)
        {
         OutStream = MyStreamNode;
         break;
@@ -318,6 +329,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        printf("[STRM][%p][%zd] Creating stream\n", QStream, MyStream->Stream.Id);
        OutStream = MyOutStreamPush(MyConNode);
        OutStream->FrameHeader = *FrameHeaderBuf;
+       OutStream->OwningStreamId = MyStream->Stream.Id;
 
        // send the frame id
        OutStream->Stream.QStream = UnidiStreamOpen(MsQuic, MyConNode->Con.QCon, MyUnidiCb, OutStream);
@@ -374,6 +386,19 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
         QUIC_SEND_FLAGS SendFlags = HasFin && I == (BufCnt - 1) ? QUIC_SEND_FLAG_FIN : QUIC_SEND_FLAG_NONE;
         MyStreamSendChunk(MsQuic, OutStream, Buf->Buffer + BufOff, Rest, SendFlags);
        }
+      }
+
+      // bufs can be modified so can't rely on Event->RECEIVE.TotalBufferLength
+      // therefore calc totalbufln
+      size_t TotalBufLn = 0;
+      for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
+      {
+       QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
+       TotalBufLn += Buf->Length;
+      }
+      if (!TotalBufLn && HasFin)
+      {
+       MyStreamSendChunk(MsQuic, OutStream, 0, 0, QUIC_SEND_FLAG_FIN);
       }
      }
      OsRwMutexDrop(MyStream->MyCon->RwMtx, 0);

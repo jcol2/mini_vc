@@ -197,6 +197,7 @@ struct wt_srv
  HQUIC Registration;
  HQUIC Configuration;
 
+ // todo remove this
  wt_con *First;
  wt_con *Last;
 };

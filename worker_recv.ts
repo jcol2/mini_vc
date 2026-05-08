@@ -114,14 +114,14 @@ HandleMsg(msg: { data: { canvas: OffscreenCanvas }})
  decoder.configure({
   codec: "vp8",
   optimizeForLatency: true,
-  hardwareAcceleration: "prefer-hardware",
+  // todo chrome doesn't like this:
+  // hardwareAcceleration: "prefer-hardware",
   // codedHeight: 720,
   // codedWidth: 1280,
  });
 
  for (;;)
  {
-  // console.log("[recv] wait");
   const {done, value} = await reader.read();
   if (done)
   {
