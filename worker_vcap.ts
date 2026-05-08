@@ -2,6 +2,7 @@ declare const CertFingerprint: string;
 let wt: WebTransport;
 let dgramWriter: WritableStreamDefaultWriter<any>;
 let run = 1;
+let frameId = 0;
 
 async function HandleChunk(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): Promise<void>
 {
@@ -11,7 +12,7 @@ async function HandleChunk(chunk: EncodedVideoChunk, metadata?: EncodedVideoChun
  chunk.copyTo(buf.subarray(headerLn));
  const view = new DataView(buf.buffer);
  // set frame id
- view.setUint32(0, 0xdeadbeef, true);
+ view.setUint32(0, frameId, true);
  // set timestamp
  view.setUint32(4, 0xdeadbeef, true);
  // set track id
@@ -25,6 +26,8 @@ async function HandleChunk(chunk: EncodedVideoChunk, metadata?: EncodedVideoChun
  writer.write(buf);
  writer.releaseLock();
  writeStream.close();
+
+ frameId++;
 
  // todo old dgram code
  // const dgramLn = wt.datagrams.maxDatagramSize;

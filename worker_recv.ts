@@ -1,7 +1,7 @@
 declare const CertFingerprint: string;
 interface jitter_buf_el
 {
- frame: Uint8Array | null,
+ frame: EncodedVideoChunk | null,
  frameId: number,
  timestamp: number,
  metadata: number,
@@ -15,6 +15,8 @@ let ctx: OffscreenCanvasRenderingContext2D;
 const jitterBufLn = 256;
 const jitterBufMask = jitterBufLn - 1;
 const jitterBuf: Array<jitter_buf_el> = new Array(jitterBufLn).fill(null).map(() => ({ frame: null, timestamp: 0, frameId: 0, metadata: 0 }));
+let jitterBufPlayIdx = 0;
+let jitterBufPlayIdxInit = 0;
 
 async function
 HandleData(receiveStream: any)
@@ -52,23 +54,40 @@ HandleData(receiveStream: any)
  const timestampMs = catView.getUint32(4, true);
  const trackId = catView.getUint8(8); // todo handle multiple tracks?
  const metadata = catView.getUint8(9);
- const jitterBufEl = jitterBuf[frameId & jitterBufMask];
- jitterBufEl.frame = catBuf;
+ const jitterBufWriteIdx = frameId & jitterBufMask;
+ const jitterBufEl = jitterBuf[jitterBufWriteIdx];
  jitterBufEl.frameId = frameId;
  jitterBufEl.timestamp = timestampMs;
  jitterBufEl.metadata = metadata;
- jitterBufEl.frame = catBuf;
  
  const frameHeaderLn = 10;
- const videoChunk = new EncodedVideoChunk({
+ jitterBufEl.frame = new EncodedVideoChunk({
   data: new DataView(catBuf.buffer, frameHeaderLn), 
   timestamp: timestampMs, 
   type: metadata ? "key" : "delta",
   // todo specify duration
  });
- decoder.decode(videoChunk);
- // console.log(jitterBufEl);
- // console.log("[recv] done with strm");
+ 
+ if (!jitterBufPlayIdxInit)
+ {
+  jitterBufPlayIdxInit = 1;
+  jitterBufPlayIdx = jitterBufWriteIdx;
+ }
+ const delta = jitterBufWriteIdx >= jitterBufPlayIdx ? jitterBufWriteIdx - jitterBufPlayIdx : jitterBufLn - jitterBufPlayIdx + jitterBufWriteIdx;
+ if (delta > 6)
+ {
+  const decodeChunk = jitterBuf[jitterBufPlayIdx];
+  if (decodeChunk.frame)
+  {
+   decoder.decode(decodeChunk.frame);
+   jitterBufPlayIdx++;
+  }
+  else
+  {
+   console.error("[recv] Error no video chunk at play idx");
+  }
+ }
+ 
 }
 
 function

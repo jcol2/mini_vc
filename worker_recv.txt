@@ -8,12 +8,13 @@
   var jitterBufLn = 256;
   var jitterBufMask = jitterBufLn - 1;
   var jitterBuf = new Array(jitterBufLn).fill(null).map(() => ({ frame: null, timestamp: 0, frameId: 0, metadata: 0 }));
+  var jitterBufPlayIdx = 0;
+  var jitterBufPlayIdxInit = 0;
   async function HandleData(receiveStream) {
     const reader = receiveStream.getReader();
     const packetBuf = [];
     let catBufLn = 0;
     for (; ; ) {
-      console.log("[recv] strm wait");
       const { done, value } = await reader.read();
       if (done) {
         break;
@@ -21,7 +22,6 @@
       packetBuf.push(value);
       catBufLn += value.length;
     }
-    console.log("[recv] my buf ln", catBufLn);
     let catBuf = new Uint8Array(catBufLn);
     let catBufOff = 0;
     for (let I = 0; I < packetBuf.length; ++I) {
@@ -34,21 +34,32 @@
     const timestampMs = catView.getUint32(4, true);
     const trackId = catView.getUint8(8);
     const metadata = catView.getUint8(9);
-    const jitterBufEl = jitterBuf[frameId & jitterBufMask];
-    jitterBufEl.frame = catBuf;
+    const jitterBufWriteIdx = frameId & jitterBufMask;
+    const jitterBufEl = jitterBuf[jitterBufWriteIdx];
     jitterBufEl.frameId = frameId;
     jitterBufEl.timestamp = timestampMs;
     jitterBufEl.metadata = metadata;
-    jitterBufEl.frame = catBuf;
     const frameHeaderLn = 10;
-    const videoChunk = new EncodedVideoChunk({
+    jitterBufEl.frame = new EncodedVideoChunk({
       data: new DataView(catBuf.buffer, frameHeaderLn),
       timestamp: timestampMs,
       type: metadata ? "key" : "delta"
       // todo specify duration
     });
-    decoder.decode(videoChunk);
-    console.log("[recv] done with strm");
+    if (!jitterBufPlayIdxInit) {
+      jitterBufPlayIdxInit = 1;
+      jitterBufPlayIdx = jitterBufWriteIdx;
+    }
+    const delta = jitterBufWriteIdx >= jitterBufPlayIdx ? jitterBufWriteIdx - jitterBufPlayIdx : jitterBufLn - jitterBufPlayIdx + jitterBufWriteIdx;
+    if (delta > 6) {
+      const decodeChunk = jitterBuf[jitterBufPlayIdx];
+      if (decodeChunk.frame) {
+        decoder.decode(decodeChunk.frame);
+        jitterBufPlayIdx++;
+      } else {
+        console.error("[recv] Error no video chunk at play idx");
+      }
+    }
   }
   function HandleDecoderOutput(videoFrame) {
     canvas.width = videoFrame.displayWidth;
@@ -81,18 +92,16 @@
     decoder.configure({
       codec: "vp8",
       optimizeForLatency: true
+      // todo chrome doesn't like this:
       // hardwareAcceleration: "prefer-hardware",
       // codedHeight: 720,
       // codedWidth: 1280,
     });
     for (; ; ) {
-      console.log("[recv] wait");
       const { done, value } = await reader.read();
       if (done) {
-        console.log("[recv] done");
         break;
       }
-      console.log("[recv] call handle data");
       await HandleData(value);
     }
     console.log("[recv] exited");

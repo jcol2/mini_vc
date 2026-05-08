@@ -4,13 +4,14 @@
   var wt;
   var dgramWriter;
   var run = 1;
+  var frameId = 0;
   async function HandleChunk(chunk, metadata) {
     const isKey = chunk.type == "key" ? 1 : 0;
     const headerLn = 10;
     const buf = new Uint8Array(headerLn + chunk.byteLength);
     chunk.copyTo(buf.subarray(headerLn));
     const view = new DataView(buf.buffer);
-    view.setUint32(0, 3735928559, true);
+    view.setUint32(0, frameId, true);
     view.setUint32(4, 3735928559, true);
     view.setUint8(8, 0);
     view.setUint8(9, isKey);
@@ -19,6 +20,7 @@
     writer.write(buf);
     writer.releaseLock();
     writeStream.close();
+    frameId++;
   }
   async function HandleMsg(Msg) {
     const reader = Msg.data.readable.getReader();
