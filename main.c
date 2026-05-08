@@ -234,11 +234,11 @@ StreamStatsGet(QUIC_API_TABLE *MsQuic, my_stream *MyStream)
  uint32_t StatsLn = sizeof(Stats);
  if (QUIC_SUCCEEDED(MsQuic->GetParam(MyStream->Stream.QStream, QUIC_PARAM_STREAM_STATISTICS, &StatsLn, &Stats)))
  {
-  printf("[CHUNK][%p][%zd][%d] HERES STATS\n", MyStream->Stream.QStream, MyStream->Stream.Id, GetCurrentThreadId());
+  WtLogDebug("[CHUNK][%p][%zd][%d] HERES STATS\n", MyStream->Stream.QStream, MyStream->Stream.Id, GetCurrentThreadId());
  }
  else
  {
-  printf("[CHUNK][%p][%zd] FAILED TO GET STATS\n", MyStream->Stream.QStream, MyStream->Stream.Id);
+  WtLogDebug("[CHUNK][%p][%zd] FAILED TO GET STATS\n", MyStream->Stream.QStream, MyStream->Stream.Id);
  }
 }
 
@@ -253,19 +253,19 @@ MyStreamSendChunk(QUIC_API_TABLE *MsQuic, my_stream *MyStream, char *ArrMem, siz
 
  if (QUIC_SUCCEEDED(MsQuic->StreamSend(MyStream->Stream.QStream, &Chunk->Buf, 1, Flags, (void *)Chunk)))
  {
-  printf("[CHUNK][%p][%zd][%d] Send queued %d %zd bytes\n", MyStream->Stream.QStream, MyStream->Stream.Id, GetCurrentThreadId(), Chunk->Buf.Length, ArrLn);
+  WtLogDebug("[CHUNK][%p][%zd][%d] Send queued %d %zd bytes\n", MyStream->Stream.QStream, MyStream->Stream.Id, GetCurrentThreadId(), Chunk->Buf.Length, ArrLn);
 
   // debugging
   MyStream->SendLn += (uint32_t)ArrLn;
   if (Flags & QUIC_SEND_FLAG_FIN)
   {
-   printf("[CHUNK][%p][%zd][%d] Send Length: %d\n", MyStream->Stream.QStream, MyStream->Stream.Id, GetCurrentThreadId(), MyStream->SendLn);
+   WtLogDebug("[CHUNK][%p][%zd][%d] Send Length: %d\n", MyStream->Stream.QStream, MyStream->Stream.Id, GetCurrentThreadId(), MyStream->SendLn);
   }
  }
  else
  {
   Ret = 0;
-  printf("[CHUNK][%p][%zd][%d] FAILED TO SEND\n", MyStream->Stream.QStream, MyStream->Stream.Id, GetCurrentThreadId());
+  WtLogDebug("[CHUNK][%p][%zd][%d] FAILED TO SEND\n", MyStream->Stream.QStream, MyStream->Stream.Id, GetCurrentThreadId());
  }
  return Ret;
 }
@@ -326,7 +326,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 
       if (!OutStream)
       {
-       printf("[STRM][%p][%zd] Creating stream\n", QStream, MyStream->Stream.Id);
+       WtLogDebug("[STRM][%p][%zd] Creating stream\n", QStream, MyStream->Stream.Id);
        OutStream = MyOutStreamPush(MyConNode);
        OutStream->FrameHeader = *FrameHeaderBuf;
        OutStream->OwningStreamId = MyStream->Stream.Id;
@@ -347,17 +347,17 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        }
        else
        {
-        printf("Create stream handle failed\n");
+        WtLogDebug("Create stream handle failed\n");
        }
       }
 
       // send the buffers
       size_t BufCnt = Event->RECEIVE.BufferCount;
       frame_chunk _Chunk;
-      printf("[CHUNK][%p][%zd] Start queue chunks for stream: %zd, BufCnt: %zd\n", QStream, MyStream->Stream.Id, OutStream->Stream.Id, BufCnt);
+      WtLogDebug("[CHUNK][%p][%zd] Start queue chunks for stream: %zd, BufCnt: %zd\n", QStream, MyStream->Stream.Id, OutStream->Stream.Id, BufCnt);
       if (HasFin)
       {
-       printf("[CHUNK][%p][%zd][%d] Recv FIN for stream: %zd\n", QStream, MyStream->Stream.Id, GetCurrentThreadId(), OutStream->Stream.Id);
+       WtLogDebug("[CHUNK][%p][%zd][%d] Recv FIN for stream: %zd\n", QStream, MyStream->Stream.Id, GetCurrentThreadId(), OutStream->Stream.Id);
       }
       for (size_t I = 0; I < BufCnt; ++I)
       {
@@ -372,7 +372,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
         if (HasFin && I == (BufCnt - 1) && !Rest && (BufOff + sizeof(_Chunk.Mem)) == IterLn)
         {
          SendFlags |= QUIC_SEND_FLAG_FIN;
-         printf("[CHUNK][%p][%zd] Assign fin flag for stream: %zd, rest: %zd iterln: %zd bufoff: %zd hasfin: %d\n", QStream, MyStream->Stream.Id, OutStream->Stream.Id, Rest, IterLn, BufOff, HasFin);
+         WtLogDebug("[CHUNK][%p][%zd] Assign fin flag for stream: %zd, rest: %zd iterln: %zd bufoff: %zd hasfin: %d\n", QStream, MyStream->Stream.Id, OutStream->Stream.Id, Rest, IterLn, BufOff, HasFin);
         }
         if (I < (BufCnt - 1) || Rest || (BufOff + sizeof(_Chunk.Mem)) < IterLn)
         {
@@ -410,7 +410,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  else if (Event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE)
  {
   // todo qstream in stream null for some reason
-  printf("[STRM][%p][%zd][%d] Peer stream shutdown, remotely: %d, by app: %d\n", QStream, MyStream->Stream.Id, GetCurrentThreadId(), Event->SHUTDOWN_COMPLETE.ConnectionClosedRemotely, Event->SHUTDOWN_COMPLETE.ConnectionShutdownByApp);
+  WtLogDebug("[STRM][%p][%zd][%d] Peer stream shutdown, remotely: %d, by app: %d\n", QStream, MyStream->Stream.Id, GetCurrentThreadId(), Event->SHUTDOWN_COMPLETE.ConnectionClosedRemotely, Event->SHUTDOWN_COMPLETE.ConnectionShutdownByApp);
   MyStreamFree(MyStream);
  }
  else if (Event->Type == QUIC_STREAM_EVENT_SEND_COMPLETE)
@@ -419,24 +419,24 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   if (Chunk)
   {
    FrameChunkFree(MyStream->MyCon, Chunk);
-   printf("[CHUNK][%p][%zd][%d] Freed chunk\n", QStream, MyStream->Stream.Id, GetCurrentThreadId());
+   WtLogDebug("[CHUNK][%p][%zd][%d] Freed chunk\n", QStream, MyStream->Stream.Id, GetCurrentThreadId());
   }
   if (Event->SEND_COMPLETE.Canceled)
   {
-   printf("[CHUNK][%p][%zd] Chunk canceled\n", QStream, MyStream->Stream.Id);
+   WtLogDebug("[CHUNK][%p][%zd] Chunk canceled\n", QStream, MyStream->Stream.Id);
   }
  }
  else if (Event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED)
  {
-  printf("[STRM][%p][%zd] SEND ABORTEDSEND ABORTESEND ABORTESEND ABORTESEND ABORTEDDDD\n", QStream, MyStream->Stream.Id);
+  WtLogDebug("[STRM][%p][%zd] SEND ABORTEDSEND ABORTESEND ABORTESEND ABORTESEND ABORTEDDDD\n", QStream, MyStream->Stream.Id);
  }
  else if (Event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED)
  {
-  printf("[STRM][%p][%zd] PEER RECEIVE ABORTED\n", QStream, MyStream->Stream.Id);
+  WtLogDebug("[STRM][%p][%zd] PEER RECEIVE ABORTED\n", QStream, MyStream->Stream.Id);
  }
  else if (Event->Type == QUIC_STREAM_EVENT_RECEIVE_BUFFER_NEEDED)
  {
-  printf("[STRM][%p][%zd] RECEIVE BUFFER NEEDED\n", QStream, MyStream->Stream.Id);
+  WtLogDebug("[STRM][%p][%zd] RECEIVE BUFFER NEEDED\n", QStream, MyStream->Stream.Id);
  }
 
  
@@ -472,7 +472,7 @@ MyConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event)
 
  if (Event->Type == QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE)
  {
-  printf("[CON] Freeing connection\n");
+  WtLogDebug("[CON] Freeing connection\n");
   MyConFree(MyCon);
  }
  return QUIC_STATUS_SUCCESS;
@@ -499,7 +499,7 @@ main(int argc, char* argv[])
  if (MySrv)
  {
   WtListen(&MySrv->Srv, 4567, MyListenCb, (void *)MySrv);
-  printf("Press Enter to exit.\n\n");
+  WtLogDebug("Press Enter to exit.\n\n");
   (void)getchar();
  }
 
@@ -528,6 +528,6 @@ main(int argc, char* argv[])
  //  WtVarintPairDecoderDecode(A.Mem, A.Ln, &OffsetA, &Pd);
  //  WtVarintPairDecoderDecode(B.Mem, B.Ln, &OffsetB, &Pd);
 
- //  printf("Done lalal\n");
+ //  WtLogDebug("Done lalal\n");
  // }
 }

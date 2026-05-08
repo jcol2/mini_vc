@@ -291,6 +291,40 @@ struct wt_stream
 
 
 
+// log
+
+
+
+enum
+{
+ WtLogLvlInfo = 2,
+ WtLogLvlDebug = 4,
+ WtLogLvlWarn = 8,
+ WtLogLvlErr = 16,
+};
+#define WtCurLogLvl WtLogLvlDebug
+
+static void
+WtLog(uint32_t Lvl, char *Fmt, ...)
+{
+ if (Lvl >= WtCurLogLvl)
+ {
+  va_list Args;
+  va_start(Args, Fmt);
+  // todo check this
+  vprintf(Fmt, Args);
+
+  va_end(Args);
+ }
+}
+
+#define WtLogInfo(Fmt, ...) WtLog(WtLogLvlInfo, Fmt, ##__VA_ARGS__)
+#define WtLogDebug(Fmt, ...) WtLog(WtLogLvlDebug, Fmt, ##__VA_ARGS__)
+#define WtLogWarn(Fmt, ...) WtLog(WtLogLvlWarn, Fmt, ##__VA_ARGS__)
+#define WtLogErr(Fmt, ...) WtLog(WtLogLvlErr, Fmt, ##__VA_ARGS__)
+
+
+
 // qpack
 
 
@@ -319,7 +353,7 @@ QpackPrepareDecode(void *Ctx, lsxpack_header *Header, size_t Space)
  wt_stream *Stream = Ctx;
  if (Space > sizeof(Stream->DecodeBuffer))
  {
-  printf("Header too big, %zu\n", Space);
+  WtLogDebug("Header too big, %zu\n", Space);
   return 0;
  }
 
@@ -404,7 +438,7 @@ QpackProcessHeader(void *Ctx, lsxpack_header *Header)
   }
   else
   {
-   printf("Ran out of header space\n");
+   WtLogDebug("Ran out of header space\n");
    Req->Fail = 1;
   }
  }
@@ -417,7 +451,7 @@ QpackProcessHeader(void *Ctx, lsxpack_header *Header)
   }
   else
   {
-   printf("Ran out of header space\n");
+   WtLogDebug("Ran out of header space\n");
    Req->Fail = 1;
   }
  }
@@ -446,13 +480,13 @@ QpackProcessHeader(void *Ctx, lsxpack_header *Header)
   }
   else
   {
-   printf("Ran out of header space\n");
+   WtLogDebug("Ran out of header space\n");
    Req->Fail = 1;
   }
  }
  else
  {
-  printf("[HEADER] Ignoring header: %.*s %.*s\n", (uint32_t)Name.Ln, Name.Mem, (uint32_t)Val.Ln, Val.Mem);
+  WtLogDebug("[HEADER] Ignoring header: %.*s %.*s\n", (uint32_t)Name.Ln, Name.Mem, (uint32_t)Val.Ln, Val.Mem);
  }
 
  return 0;
@@ -662,7 +696,7 @@ H3HeaderEncode(lsqpack_enc *Enc, uint64_t StreamId, h3_header *Headers, size_t H
 //  //
 //  void* SendBufferRaw = malloc(sizeof(QUIC_BUFFER) + SendBufferLength);
 //  if (SendBufferRaw == NULL) {
-//      printf("SendBuffer allocation failed!\n");
+//      WtLogDebug("SendBuffer allocation failed!\n");
 //      MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0);
 //      return;
 //  }
@@ -670,7 +704,7 @@ H3HeaderEncode(lsqpack_enc *Enc, uint64_t StreamId, h3_header *Headers, size_t H
 //  SendBuffer->Buffer = (uint8_t*)SendBufferRaw + sizeof(QUIC_BUFFER);
 //  SendBuffer->Length = SendBufferLength;
 
-//  printf("[strm][%p] Sending data...\n", Stream);
+//  WtLogDebug("[strm][%p] Sending data...\n", Stream);
 
 //  //
 //  // Sends the buffer over the stream. Note the FIN flag is passed along with
@@ -679,7 +713,7 @@ H3HeaderEncode(lsqpack_enc *Enc, uint64_t StreamId, h3_header *Headers, size_t H
 //  //
 //  QUIC_STATUS Status;
 //  if (QUIC_FAILED(Status = MsQuic->StreamSend(Stream, SendBuffer, 1, QUIC_SEND_FLAG_FIN, SendBuffer))) {
-//      printf("StreamSend failed, 0x%x!\n", Status);
+//      WtLogDebug("StreamSend failed, 0x%x!\n", Status);
 //      free(SendBufferRaw);
 //      MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0);
 //  }
@@ -688,7 +722,7 @@ H3HeaderEncode(lsqpack_enc *Enc, uint64_t StreamId, h3_header *Headers, size_t H
 static void
 StreamSendShutdown(QUIC_API_TABLE *MsQuic, HQUIC Stream, int32_t StatusCode)
 {
- printf("[STRM][%p] STREAM SHUTDOWN CALLED\n", Stream);
+ WtLog(WtLogLvlDebug, "[STRM][%p] STREAM SHUTDOWN CALLED\n", Stream);
  MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND | QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE, StatusCode);
 }
 
@@ -805,7 +839,7 @@ H3SettingsInsert(h3_settings *Out, uint64_t SettingType, uint64_t SettingVal)
   default:
   {
    Ret = 0;
-   printf("[SETTING] Recvd unknown setting: %zd %zd\n", SettingType, SettingVal);
+   WtLogDebug("[SETTING] Recvd unknown setting: %zd %zd\n", SettingType, SettingVal);
   }
  }
  return Ret;
@@ -881,18 +915,18 @@ WtVarintPairDecoderDecode(char *ArrMem, size_t ArrLn, size_t *Offset, varint_pai
 static void
 H3SettingsLog(h3_settings *Settings)
 {
- printf("[SETTING] MaxFieldSectionSize: %d\n", Settings->MaxFieldSectionSize);
- printf("[SETTING] QpackMaxTableLn: %d\n", Settings->QpackMaxTableLn);
- printf("[SETTING] QpackBlockedStreams: %d\n", Settings->QpackBlockedStreams);
- printf("[SETTING] WtMaxSessions: %d\n", Settings->WtMaxSessions);
-
- printf("[SETTING] DatagramOn: %d\n", Settings->DatagramOn);
- printf("[SETTING] ConnectProtocolOn: %d\n", Settings->ConnectProtocolOn);
- printf("[SETTING] WebtransportOn: %d\n", Settings->WebtransportOn);
- printf("[SETTING] WebtransportEnabledDraft15: %d\n", Settings->WebtransportEnabledDraft15);
-
- printf("[SETTING] Sent: %d\n", Settings->Sent);
- printf("[SETTING] Recvd: %d\n", Settings->Recvd);
+ WtLogDebug("[SETTING] MaxFieldSectionSize: %d\n", Settings->MaxFieldSectionSize);
+ WtLogDebug("[SETTING] QpackMaxTableLn: %d\n", Settings->QpackMaxTableLn);
+ WtLogDebug("[SETTING] QpackBlockedStreams: %d\n", Settings->QpackBlockedStreams);
+ WtLogDebug("[SETTING] WtMaxSessions: %d\n", Settings->WtMaxSessions);
+ 
+ WtLogDebug("[SETTING] DatagramOn: %d\n", Settings->DatagramOn);
+ WtLogDebug("[SETTING] ConnectProtocolOn: %d\n", Settings->ConnectProtocolOn);
+ WtLogDebug("[SETTING] WebtransportOn: %d\n", Settings->WebtransportOn);
+ WtLogDebug("[SETTING] WebtransportEnabledDraft15: %d\n", Settings->WebtransportEnabledDraft15);
+ 
+ WtLogDebug("[SETTING] Sent: %d\n", Settings->Sent);
+ WtLogDebug("[SETTING] Recvd: %d\n", Settings->Recvd);
 }
 
 static uint32_t
@@ -1015,12 +1049,12 @@ WtControlStreamCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   // returned back to the app.
   // todo eventually put settings msg in separate alloc?
   // free(Event->SEND_COMPLETE.ClientContext);
-  printf("[strm][%p] Data sent\n", QStream);
+  WtLogDebug("[strm][%p] Data sent\n", QStream);
   break;
  }
  case QUIC_STREAM_EVENT_RECEIVE:
  {
-  printf("[strm][%p] Data received\n", QStream);
+  WtLogDebug("[strm][%p] Data received\n", QStream);
 
   OsRwMutexTake(Stream->Con->RwMtx, 1);
   for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
@@ -1062,7 +1096,7 @@ WtControlStreamCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        Stream->FrameOffset = 0;
        Stream->CurFrameHeader = (varint_pair_decoder){0};
        Stream->Con->PeerSettings.Recvd = 1;
-       printf("[SETTING] Parsed peer settings:\n");
+       WtLogDebug("[SETTING] Parsed peer settings:\n");
        H3SettingsLog(&Stream->Con->PeerSettings);
        // todo validate recvd settings
 
@@ -1078,7 +1112,7 @@ WtControlStreamCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        };
        QUIC_BUFFER *SendBuf = &Stream->Con->QBuf;
        a8 Msg = {0};
-       printf("[SETTING] Sending response:\n");
+       WtLogDebug("[SETTING] Sending response:\n");
        H3SettingsLog(&LocalSettings);
        if (!H3SettingsSer(&LocalSettings, Stream->Con->SettingsMsg, sizeof(Stream->Con->SettingsMsg), &Msg))
        {
@@ -1143,14 +1177,14 @@ WtControlStreamCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
  {
   // The peer gracefully shut down its send direction of the stream.
-  printf("[strm][%p] Peer shut down\n", QStream);
+  WtLogDebug("[strm][%p] Peer shut down\n", QStream);
   // ServerSend(Stream);
   break;
  }
  case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
  {
   // The peer aborted its send direction of the stream.
-  printf("[strm][%p] Peer aborted\n", QStream);
+  WtLogDebug("[strm][%p] Peer aborted\n", QStream);
   MsQuic->StreamShutdown(QStream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0);
   break;
  }
@@ -1158,7 +1192,7 @@ WtControlStreamCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  {
   // Both directions of the stream have been shut down and MsQuic is done
   // with the stream. It can now be safely cleaned up.
-  printf("[strm][%p] All done\n", QStream);
+  WtLogDebug("[strm][%p] All done\n", QStream);
   MsQuic->StreamClose(QStream);
   break;
  }
@@ -1174,11 +1208,11 @@ static QUIC_STATUS
 WtUnidiWtCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
  wt_stream *Stream = (wt_stream *)Ctx;
- printf("[STRM] Unidi application stream recv\n");
+ WtLogDebug("[STRM] Unidi application stream recv\n");
  uint64_t SessionId = Stream->StreamHeader.Val2;
  if (SessionId != Stream->Con->SessionStream->Id)
  {
-  printf("[STRM] Unidi stream bad session id\n");
+  WtLogDebug("[STRM] Unidi stream bad session id\n");
   return QUIC_STATUS_SUCCESS;
  }
 
@@ -1245,17 +1279,17 @@ WtUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   {
    case H3StreamControl:
    {
-    printf("[STRM] Recv control stream\n");
+    WtLogDebug("[STRM] Recv control stream\n");
     return WtControlStreamCb(QStream, Ctx, Event);
    } break;
    case H3StreamQpackEncoder:
    {
-    printf("[STRM] Recv qpack encoder\n");
+    WtLogDebug("[STRM] Recv qpack encoder\n");
     return QUIC_STATUS_SUCCESS;
    } break;
    case H3StreamQpackDecoder:
    {
-    printf("[STRM] Recv qpack decoder\n");
+    WtLogDebug("[STRM] Recv qpack decoder\n");
     return QUIC_STATUS_SUCCESS;
    } break;
    case H3StreamUniWebtransportStream:
@@ -1289,7 +1323,7 @@ WtUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   {
    ConnectionShutdown(MsQuic, Stream->Con->QCon, H3ErrInternalError);
   }
-  printf("[STRM][%p][%zd] Start complete - peer accepted: %d\n", Stream->QStream, Stream->Id, Event->START_COMPLETE.PeerAccepted);
+  WtLogDebug("[STRM][%p][%zd] Start complete - peer accepted: %d\n", Stream->QStream, Stream->Id, Event->START_COMPLETE.PeerAccepted);
  }
  return QUIC_STATUS_SUCCESS;
 }
@@ -1366,14 +1400,14 @@ WtBidiH3Recv(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
       {
        if (!Stream->Con->PeerSettings.Recvd || Stream->Con->SessionStream)
        {
-        printf("Bad connnect req\n");
+        WtLogDebug("Bad connnect req\n");
         StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
         goto Done;
        }
        else
        {
         Stream->Con->SessionStream = Stream;
-        printf("Recvd valid connect req\n");
+        WtLogDebug("Recvd valid connect req\n");
 
         h3_header Headers[] = {
          (h3_header){.Name = CStr(":status"), .Val = CStr("200")},
@@ -1387,12 +1421,12 @@ WtBidiH3Recv(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
          StreamSendShutdown(MsQuic, QStream, H3ErrInternalError);
          goto Done;
         }
-        printf("Sent connect response\n");
+        WtLogDebug("Sent connect response\n");
        }
       }
       else
       {
-       printf("Bad connnect req\n");
+       WtLogDebug("Bad connnect req\n");
        StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
        goto Done;
       }
@@ -1406,13 +1440,13 @@ WtBidiH3Recv(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
     } break;
     case H3FrameData:
     {
-     printf("Recv data frame\n");
+     WtLogDebug("Recv data frame\n");
      Stream->FrameOffset += Avail;
      Offset += Avail;
     } break;
     default:
     {
-     printf("Recv unknown bidi frame\n");
+     WtLogDebug("Recv unknown bidi frame\n");
      Stream->FrameOffset += Avail;
      Offset += Avail;
     } break;
@@ -1439,7 +1473,7 @@ WtBidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  {
   case QUIC_STREAM_EVENT_RECEIVE:
   {
-   printf("Bidi stream RECEIVE\n");
+   WtLogDebug("Bidi stream RECEIVE\n");
    if (!(Event->RECEIVE.TotalBufferLength && Event->RECEIVE.BufferCount))
    {
     return QUIC_STATUS_SUCCESS;
@@ -1492,7 +1526,7 @@ WtBidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
   {
    // The peer aborted its send direction of the stream.
-   printf("[strm][%p] Peer aborted\n", QStream);
+   WtLogDebug("[strm][%p] Peer aborted\n", QStream);
    MsQuic->StreamShutdown(QStream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0);
    break;
   }
@@ -1500,7 +1534,7 @@ WtBidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   {
    // Both directions of the stream have been shut down and MsQuic is done
    // with the stream. It can now be safely cleaned up.
-   printf("[strm][%p] All done\n", QStream);
+   WtLogDebug("[strm][%p] All done\n", QStream);
    MsQuic->StreamClose(QStream);
    break;
   }
@@ -1523,7 +1557,7 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
  case QUIC_CONNECTION_EVENT_CONNECTED:
  {
   // The handshake has completed for the connection.
-  printf("[conn][%p] Connected\n", QCon);
+  WtLogDebug("[conn][%p] Connected\n", QCon);
 
   OsRwMutexTake(Con->RwMtx, 1);
   Con->QCon = QCon;
@@ -1551,31 +1585,31 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
   // protocol, since we let idle timeout kill the connection.
   if (Event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status == QUIC_STATUS_CONNECTION_IDLE)
   {
-   printf("[conn][%p] Successfully shut down on idle.\n", QCon);
+   WtLogDebug("[conn][%p] Successfully shut down on idle.\n", QCon);
   }
   else
   {
-   printf("[conn][%p] Shut down by transport, 0x%x\n", QCon, Event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status);
+   WtLogDebug("[conn][%p] Shut down by transport, 0x%x\n", QCon, Event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status);
   }
   break;
  }
  case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
  {
   // The connection was explicitly shut down by the peer.
-  printf("[conn][%p] Shut down by peer, 0x%llu\n", QCon, (unsigned long long)Event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
+  WtLogDebug("[conn][%p] Shut down by peer, 0x%llu\n", QCon, (unsigned long long)Event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
   break;
  }
  case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
  {
   // The connection has completed the shutdown process and is ready to be
   // safely cleaned up.
-  printf("[conn][%p] All done\n", QCon);
+  WtLogDebug("[conn][%p] All done\n", QCon);
   MsQuic->ConnectionClose(QCon);
   break;
  }
  case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
  {
-  printf("[STRM][%p] Peer started\n", Event->PEER_STREAM_STARTED.Stream);
+  WtLogDebug("[STRM][%p] Peer started\n", Event->PEER_STREAM_STARTED.Stream);
 
   if (Event->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL)
   {
@@ -1591,7 +1625,7 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
  {
   // The connection succeeded in doing a TLS resumption of a previous
   // connection's session.
-  printf("[conn][%p] Connection resumed!\n", QCon);
+  WtLogDebug("[conn][%p] Connection resumed!\n", QCon);
   break;
  }
  case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED:
@@ -1604,11 +1638,11 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
   OsRwMutexTake(Con->RwMtx, 0);
   if (Con->SessionStream && QuarterId == (Con->SessionStream->Id / 4))
   {
-   printf("[DGRAM] QuarterId: %zd, Payload: %.*s\n", QuarterId, (uint32_t)View.Ln, View.Mem);
+   WtLogDebug("[DGRAM] QuarterId: %zd, Payload: %.*s\n", QuarterId, (uint32_t)View.Ln, View.Mem);
   }
   else
   {
-   printf("[DGRAM] Recv dgram with bad quarter id\n");
+   WtLogDebug("[DGRAM] Recv dgram with bad quarter id\n");
   }
   OsRwMutexDrop(Con->RwMtx, 0);
 
@@ -1637,7 +1671,7 @@ WtListenCb(HQUIC Listener, void *Ctx, QUIC_LISTENER_EVENT *Event, void *ConCb, v
  case QUIC_LISTENER_EVENT_STOP_COMPLETE:
  {
   Status = QUIC_STATUS_SUCCESS;
-  printf("QUIC_LISTENER_EVENT_STOP_COMPLETE\n");
+  WtLogDebug("QUIC_LISTENER_EVENT_STOP_COMPLETE\n");
   break;
  }
  default:
@@ -1709,23 +1743,23 @@ WtInit(ar *Ar, wt_srv *Srv)
      }
      else
      {
-      printf("ConfigurationLoadCredential failed, 0x%x!\n", Status);
+      WtLogDebug("ConfigurationLoadCredential failed, 0x%x!\n", Status);
      }
     }
     else
     {
-     printf("ConfigurationOpen failed, 0x%x!\n", Status);
+     WtLogDebug("ConfigurationOpen failed, 0x%x!\n", Status);
     }
    }
   }
   else
   {
-   printf("RegistrationOpen failed, 0x%x!\n", Status);
+   WtLogDebug("RegistrationOpen failed, 0x%x!\n", Status);
   }
  }
  else
  {
-  printf("MsQuicOpen2 failed, 0x%x!\n", Status);
+  WtLogDebug("MsQuicOpen2 failed, 0x%x!\n", Status);
  }
 
  if (!Succeeded)
@@ -1750,12 +1784,12 @@ WtListen(wt_srv *Srv, uint16_t Port, QUIC_LISTENER_CALLBACK_HANDLER ListenCb, vo
   }
   else
   {
-   printf("ListenerStart failed, 0x%x!\n", Status);
+   WtLogDebug("ListenerStart failed, 0x%x!\n", Status);
   }
  }
  else
  {
-  printf("ListenerOpen failed, 0x%x!\n", Status);
+  WtLogDebug("ListenerOpen failed, 0x%x!\n", Status);
  }
  return Succeeded;
 }
