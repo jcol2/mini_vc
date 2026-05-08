@@ -73,8 +73,8 @@ HandleMsg(Msg: { data: { readable: ReadableStreamDefaultReader<VideoFrame | Audi
  });
 
  encoder.configure({
-  height: 480,
-  width: 640,
+  height: 720,
+  width: 1280,
   bitrate: 2_000_000,
   framerate: 30,
   codec: "vp8",

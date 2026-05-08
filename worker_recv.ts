@@ -81,6 +81,7 @@ HandleData(receiveStream: any)
   {
    decoder.decode(decodeChunk.frame);
    jitterBufPlayIdx++;
+   jitterBufPlayIdx %= jitterBufMask;
   }
   else
   {
@@ -141,6 +142,7 @@ HandleMsg(msg: { data: { canvas: OffscreenCanvas }})
 
  for (;;)
  {
+  // console.log("[recv] wait");
   const {done, value} = await reader.read();
   if (done)
   {
