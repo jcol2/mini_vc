@@ -409,8 +409,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  }
  else if (Event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE)
  {
-  // todo qstream in stream null for some reason
-  WtLogDebug("[STRM][%p][%zd][%d] Peer stream shutdown, remotely: %d, by app: %d\n", QStream, MyStream->Stream.Id, GetCurrentThreadId(), Event->SHUTDOWN_COMPLETE.ConnectionClosedRemotely, Event->SHUTDOWN_COMPLETE.ConnectionShutdownByApp);
+  WtLogDebug("[STRM][%p][%zd][%d] Unidi peer stream shutdown, remotely: %d, by app: %d\n", QStream, MyStream->Stream.Id, GetCurrentThreadId(), Event->SHUTDOWN_COMPLETE.ConnectionClosedRemotely, Event->SHUTDOWN_COMPLETE.ConnectionShutdownByApp);
   MyStreamFree(MyStream);
  }
  else if (Event->Type == QUIC_STREAM_EVENT_SEND_COMPLETE)
@@ -450,8 +449,9 @@ MyBidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  
  WtBidiCb(QStream, &MyStream->Stream, Event);
 
- if (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN)
+ if (Event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE)
  {
+  WtLogDebug("[STRM][%p][%zd][%d] Bidi peer stream shutdown, remotely: %d, by app: %d\n", QStream, MyStream->Stream.Id, GetCurrentThreadId(), Event->SHUTDOWN_COMPLETE.ConnectionClosedRemotely, Event->SHUTDOWN_COMPLETE.ConnectionShutdownByApp);
   MyStreamFree(MyStream);
  }
 
