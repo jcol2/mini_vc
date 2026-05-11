@@ -18,8 +18,28 @@ const jitterBuf: Array<jitter_buf_el> = new Array(jitterBufLn).fill(null).map(()
 let jitterBufPlayIdx = 0;
 let jitterBufPlayIdxInit = 0;
 
+async function 
+WebTransportAlloc(): Promise<WebTransport>
+{
+ const hashBytes: Uint8Array = Uint8Array.fromHex(CertFingerprint);
+ const ret = new WebTransport(
+  "https://127.0.0.1:4567/",
+  {
+   allowPooling: false,
+   serverCertificateHashes: [
+    {
+     algorithm: "sha-256",
+     value: hashBytes.buffer as BufferSource,
+    },
+   ],
+  }
+ );
+ await ret.ready;
+ return ret;
+}
+
 async function
-HandleData(receiveStream: any)
+UnidiCb(receiveStream: any)
 {
  // receive stream chunks
  const reader = receiveStream.getReader();
@@ -100,7 +120,7 @@ HandleData(receiveStream: any)
 }
 
 function
-HandleDecoderOutput(videoFrame: VideoFrame)
+DecoderCb(videoFrame: VideoFrame)
 {
  canvas.width = videoFrame.displayWidth;
  canvas.height = videoFrame.displayHeight;
@@ -109,36 +129,23 @@ HandleDecoderOutput(videoFrame: VideoFrame)
 }
 
 function
-HandleDecoderError(err: Error)
+DecoderErrCb(err: Error)
 {
  console.error(err);
 }
 
 async function
-HandleMsg(msg: { data: { canvas: OffscreenCanvas }})
+WorkerMsgCb(msg: { data: { canvas: OffscreenCanvas }})
 {
  canvas = msg.data.canvas;
  ctx = canvas.getContext("2d") as OffscreenCanvasRenderingContext2D;
 
  // init wt
- const hashBytes: Uint8Array = Uint8Array.fromHex(CertFingerprint);
- wt = new WebTransport(
-  "https://127.0.0.1:4567/",
-  {
-   allowPooling: false,
-   serverCertificateHashes: [
-    {
-     algorithm: "sha-256",
-     value: hashBytes.buffer as BufferSource,
-    },
-   ],
-  }
- );
- await wt.ready;
+ wt = await WebTransportAlloc();
  let reader = wt.incomingUnidirectionalStreams.getReader();
 
  // init decoder
- decoder = new VideoDecoder({output: HandleDecoderOutput, error: HandleDecoderError});
+ decoder = new VideoDecoder({output: DecoderCb, error: DecoderErrCb});
  decoder.configure({
   codec: "vp8",
   optimizeForLatency: true,
@@ -155,21 +162,30 @@ HandleMsg(msg: { data: { canvas: OffscreenCanvas }})
   const res = await Promise.race([reader.read(), timeout]) as any;
   if (res.skip)
   {
-   // await reader.cancel();
-   // reader.releaseLock();
-   // reader = wt.incomingUnidirectionalStreams.getReader();
    console.log('[recv] timeout - skipping');
+   await reader.cancel();
+   reader.releaseLock();
+   wt.close();
+   wt = await WebTransportAlloc();
+   reader = wt.incomingUnidirectionalStreams.getReader();
    continue;
   }
   if (res.done)
   {
    break;
   }
-  await HandleData(res.value);
+  await UnidiCb(res.value);
  }
  console.log("[recv] exited");
 }
 
-onmessage = HandleMsg;
+function
+WorkerErrCb(err: any)
+{
+ console.error(err);
+}
+
+onmessage = WorkerMsgCb;
+onerror = WorkerErrCb;
 
 export {};

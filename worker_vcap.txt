@@ -5,7 +5,7 @@
   var dgramWriter;
   var run = 1;
   var frameId = 0;
-  async function HandleChunk(chunk, metadata) {
+  async function EncoderCb(chunk, metadata) {
     const isKey = chunk.type == "key" ? 1 : 0;
     const headerLn = 10;
     const buf = new Uint8Array(headerLn + chunk.byteLength);
@@ -22,7 +22,7 @@
     writeStream.close();
     frameId++;
   }
-  async function HandleMsg(Msg) {
+  async function WorkerMsgCb(Msg) {
     const reader = Msg.data.readable.getReader();
     const hashBytes = Uint8Array.fromHex("df823a1cdf02b7f464865756ad671bf4a9466587f48e9574e7bab1cbb1b9b9e8");
     wt = new WebTransport(
@@ -43,17 +43,40 @@
     });
     dgramWriter = wt.datagrams.writable.getWriter();
     const encoder = new VideoEncoder({
-      output: HandleChunk,
+      output: EncoderCb,
       error: console.log
     });
-    encoder.configure({
-      height: 720,
-      width: 1280,
-      bitrate: 2e6,
-      framerate: 30,
-      codec: "vp8",
-      latencyMode: "realtime"
-    });
+    const codecs = [
+      "vp8",
+      // todo temp codec
+      "av01.0.08M.08",
+      "vp09.00.40.08",
+      "avc1.64002a"
+    ];
+    const accelerations = ["no-preference", "prefer-hardware", "prefer-software"];
+    const configs = [];
+    for (const acceleration of accelerations) {
+      for (const codec of codecs) {
+        configs.push({
+          codec,
+          hardwareAcceleration: acceleration,
+          width: 1280,
+          height: 720,
+          bitrate: 2e6,
+          bitrateMode: "constant",
+          framerate: 30,
+          latencyMode: "realtime"
+        });
+      }
+    }
+    for (const config of configs) {
+      const support = await VideoEncoder.isConfigSupported(config);
+      if (support.supported && support.config) {
+        console.log("VideoEncoder using: ", support.config);
+        encoder.configure(support.config);
+        break;
+      }
+    }
     let frameCounter = 0;
     while (run) {
       const { done, value } = await reader.read();
@@ -68,5 +91,9 @@
     console.log("[vcap]", wt.closed);
     console.log("[vcap] exited");
   }
-  onmessage = HandleMsg;
+  function WorkerErrCb(err) {
+    console.error(err);
+  }
+  onmessage = WorkerMsgCb;
+  onerror = WorkerErrCb;
 })();

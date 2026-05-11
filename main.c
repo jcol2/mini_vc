@@ -206,7 +206,7 @@ static void
 MyStreamFree(QUIC_API_TABLE *MsQuic, my_stream *MyStream)
 {
  my_con *MyCon = MyStream->MyCon;
- WtLogErr("[STRM][%p][%zd] Freeing stream\n", MyStream->Stream.QStream, MyStream->Stream.Id);
+ WtLogDebug("[STRM][%p][%zd] Freeing stream\n", MyStream->Stream.QStream, MyStream->Stream.Id);
  if (MyStream->FirstChunk)
  {
   WtLogErr("[STRM][%p][%zd] ERROR: Chunks found in freed stream!!!\n", MyStream->Stream.QStream, MyStream->Stream.Id);

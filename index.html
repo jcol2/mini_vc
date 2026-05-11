@@ -22,7 +22,7 @@
 "use strict";
 (() => {
   // worker_vcap.txt
-  var worker_vcap_default = '"use strict";\n(() => {\n  // worker_vcap.ts\n  var wt;\n  var dgramWriter;\n  var run = 1;\n  var frameId = 0;\n  async function HandleChunk(chunk, metadata) {\n    const isKey = chunk.type == "key" ? 1 : 0;\n    const headerLn = 10;\n    const buf = new Uint8Array(headerLn + chunk.byteLength);\n    chunk.copyTo(buf.subarray(headerLn));\n    const view = new DataView(buf.buffer);\n    view.setUint32(0, frameId, true);\n    view.setUint32(4, 3735928559, true);\n    view.setUint8(8, 0);\n    view.setUint8(9, isKey);\n    const writeStream = await wt.createUnidirectionalStream({ sendOrder: 1 });\n    const writer = writeStream.getWriter();\n    writer.write(buf);\n    writer.releaseLock();\n    writeStream.close();\n    frameId++;\n  }\n  async function HandleMsg(Msg) {\n    const reader = Msg.data.readable.getReader();\n    const hashBytes = Uint8Array.fromHex("df823a1cdf02b7f464865756ad671bf4a9466587f48e9574e7bab1cbb1b9b9e8");\n    wt = new WebTransport(\n      "https://127.0.0.1:4567/",\n      {\n        allowPooling: false,\n        serverCertificateHashes: [\n          {\n            algorithm: "sha-256",\n            value: hashBytes.buffer\n          }\n        ]\n      }\n    );\n    await wt.ready;\n    wt.closed.finally(() => {\n      run = 0;\n    });\n    dgramWriter = wt.datagrams.writable.getWriter();\n    const encoder = new VideoEncoder({\n      output: HandleChunk,\n      error: console.log\n    });\n    encoder.configure({\n      height: 720,\n      width: 1280,\n      bitrate: 2e6,\n      framerate: 30,\n      codec: "vp8",\n      latencyMode: "realtime"\n    });\n    let frameCounter = 0;\n    while (run) {\n      const { done, value } = await reader.read();\n      if (done) return;\n      if (encoder.encodeQueueSize < 3) {\n        const keyFrame = frameCounter % 150 == 0;\n        encoder.encode(value, { keyFrame });\n        frameCounter++;\n      }\n      value.close();\n    }\n    console.log("[vcap]", wt.closed);\n    console.log("[vcap] exited");\n  }\n  onmessage = HandleMsg;\n})();\n';
+  var worker_vcap_default = '"use strict";\n(() => {\n  // worker_vcap.ts\n  var wt;\n  var dgramWriter;\n  var run = 1;\n  var frameId = 0;\n  async function EncoderCb(chunk, metadata) {\n    const isKey = chunk.type == "key" ? 1 : 0;\n    const headerLn = 10;\n    const buf = new Uint8Array(headerLn + chunk.byteLength);\n    chunk.copyTo(buf.subarray(headerLn));\n    const view = new DataView(buf.buffer);\n    view.setUint32(0, frameId, true);\n    view.setUint32(4, 3735928559, true);\n    view.setUint8(8, 0);\n    view.setUint8(9, isKey);\n    const writeStream = await wt.createUnidirectionalStream({ sendOrder: 1 });\n    const writer = writeStream.getWriter();\n    writer.write(buf);\n    writer.releaseLock();\n    writeStream.close();\n    frameId++;\n  }\n  async function WorkerMsgCb(Msg) {\n    const reader = Msg.data.readable.getReader();\n    const hashBytes = Uint8Array.fromHex("df823a1cdf02b7f464865756ad671bf4a9466587f48e9574e7bab1cbb1b9b9e8");\n    wt = new WebTransport(\n      "https://127.0.0.1:4567/",\n      {\n        allowPooling: false,\n        serverCertificateHashes: [\n          {\n            algorithm: "sha-256",\n            value: hashBytes.buffer\n          }\n        ]\n      }\n    );\n    await wt.ready;\n    wt.closed.finally(() => {\n      run = 0;\n    });\n    dgramWriter = wt.datagrams.writable.getWriter();\n    const encoder = new VideoEncoder({\n      output: EncoderCb,\n      error: console.log\n    });\n    const codecs = [\n      "vp8",\n      // todo temp codec\n      "av01.0.08M.08",\n      "vp09.00.40.08",\n      "avc1.64002a"\n    ];\n    const accelerations = ["no-preference", "prefer-hardware", "prefer-software"];\n    const configs = [];\n    for (const acceleration of accelerations) {\n      for (const codec of codecs) {\n        configs.push({\n          codec,\n          hardwareAcceleration: acceleration,\n          width: 1280,\n          height: 720,\n          bitrate: 2e6,\n          bitrateMode: "constant",\n          framerate: 30,\n          latencyMode: "realtime"\n        });\n      }\n    }\n    for (const config of configs) {\n      const support = await VideoEncoder.isConfigSupported(config);\n      if (support.supported && support.config) {\n        console.log("VideoEncoder using: ", support.config);\n        encoder.configure(support.config);\n        break;\n      }\n    }\n    let frameCounter = 0;\n    while (run) {\n      const { done, value } = await reader.read();\n      if (done) return;\n      if (encoder.encodeQueueSize < 3) {\n        const keyFrame = frameCounter % 150 == 0;\n        encoder.encode(value, { keyFrame });\n        frameCounter++;\n      }\n      value.close();\n    }\n    console.log("[vcap]", wt.closed);\n    console.log("[vcap] exited");\n  }\n  function WorkerErrCb(err) {\n    console.error(err);\n  }\n  onmessage = WorkerMsgCb;\n  onerror = WorkerErrCb;\n})();\n';
 
   // worker_recv.txt
   var worker_recv_default = `"use strict";
@@ -37,7 +37,24 @@
   var jitterBuf = new Array(jitterBufLn).fill(null).map(() => ({ frame: null, timestamp: 0, frameId: 0, metadata: 0 }));
   var jitterBufPlayIdx = 0;
   var jitterBufPlayIdxInit = 0;
-  async function HandleData(receiveStream) {
+  async function WebTransportAlloc() {
+    const hashBytes = Uint8Array.fromHex("df823a1cdf02b7f464865756ad671bf4a9466587f48e9574e7bab1cbb1b9b9e8");
+    const ret = new WebTransport(
+      "https://127.0.0.1:4567/",
+      {
+        allowPooling: false,
+        serverCertificateHashes: [
+          {
+            algorithm: "sha-256",
+            value: hashBytes.buffer
+          }
+        ]
+      }
+    );
+    await ret.ready;
+    return ret;
+  }
+  async function UnidiCb(receiveStream) {
     const reader = receiveStream.getReader();
     const packetBuf = [];
     let catBufLn = 0;
@@ -96,34 +113,21 @@
       }
     }
   }
-  function HandleDecoderOutput(videoFrame) {
+  function DecoderCb(videoFrame) {
     canvas.width = videoFrame.displayWidth;
     canvas.height = videoFrame.displayHeight;
     ctx.drawImage(videoFrame, 0, 0);
     videoFrame.close();
   }
-  function HandleDecoderError(err) {
+  function DecoderErrCb(err) {
     console.error(err);
   }
-  async function HandleMsg(msg) {
+  async function WorkerMsgCb(msg) {
     canvas = msg.data.canvas;
     ctx = canvas.getContext("2d");
-    const hashBytes = Uint8Array.fromHex("df823a1cdf02b7f464865756ad671bf4a9466587f48e9574e7bab1cbb1b9b9e8");
-    wt = new WebTransport(
-      "https://127.0.0.1:4567/",
-      {
-        allowPooling: false,
-        serverCertificateHashes: [
-          {
-            algorithm: "sha-256",
-            value: hashBytes.buffer
-          }
-        ]
-      }
-    );
-    await wt.ready;
+    wt = await WebTransportAlloc();
     let reader = wt.incomingUnidirectionalStreams.getReader();
-    decoder = new VideoDecoder({ output: HandleDecoderOutput, error: HandleDecoderError });
+    decoder = new VideoDecoder({ output: DecoderCb, error: DecoderErrCb });
     decoder.configure({
       codec: "vp8",
       optimizeForLatency: true
@@ -136,20 +140,26 @@
       const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 5e3));
       const res = await Promise.race([reader.read(), timeout]);
       if (res.skip) {
+        console.log("[recv] timeout - skipping");
         await reader.cancel();
         reader.releaseLock();
+        wt.close();
+        wt = await WebTransportAlloc();
         reader = wt.incomingUnidirectionalStreams.getReader();
-        console.log("[recv] timeout - skipping");
         continue;
       }
       if (res.done) {
         break;
       }
-      await HandleData(res.value);
+      await UnidiCb(res.value);
     }
     console.log("[recv] exited");
   }
-  onmessage = HandleMsg;
+  function WorkerErrCb(err) {
+    console.error(err);
+  }
+  onmessage = WorkerMsgCb;
+  onerror = WorkerErrCb;
 })();
 `;
 
@@ -297,30 +307,34 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
   function ElQuery(str) {
     return document.querySelector(str);
   }
+  function StreamStart(mediaStream, offscreenCanvas) {
+    const track = mediaStream.getVideoTracks()[0];
+    const processor = new MediaStreamTrackProcessor({ track });
+    const readable = processor.readable;
+    const vcapBlob = new Blob([worker_vcap_default], { type: "text/javascript" });
+    const vcapWorker = new Worker(window.URL.createObjectURL(vcapBlob), { name: "worker_vcap" });
+    const recvBlob = new Blob([worker_recv_default], { type: "text/javascript" });
+    const recvWorker = new Worker(window.URL.createObjectURL(recvBlob), { name: "worker_recv" });
+    vcapWorker.postMessage({ readable }, [readable]);
+    recvWorker.postMessage({ canvas: offscreenCanvas }, [offscreenCanvas]);
+  }
   async function Main() {
     const recvCanvas = ElQuery("#recv_canvas");
     const offscreenCanvas = recvCanvas.transferControlToOffscreen();
     const screenCapBtn = ElQuery("#screen_cap_btn");
     screenCapBtn?.addEventListener("click", async (E) => {
-      const capStream = await navigator.mediaDevices.getDisplayMedia();
+      const mediaStream = await navigator.mediaDevices.getDisplayMedia();
+      StreamStart(mediaStream, offscreenCanvas);
     });
     const camerCapBtn = ElQuery("#camera_cap_btn");
     camerCapBtn?.addEventListener("click", async (E) => {
-      const capStream = await navigator.mediaDevices.getUserMedia(
+      const mediaStream = await navigator.mediaDevices.getUserMedia(
         {
           video: { width: 1280, height: 720, frameRate: 30 },
           audio: true
         }
       );
-      const track = capStream.getVideoTracks()[0];
-      const processor = new MediaStreamTrackProcessor({ track });
-      const readable = processor.readable;
-      const vcapBlob = new Blob([worker_vcap_default], { type: "text/javascript" });
-      const vcapWorker = new Worker(window.URL.createObjectURL(vcapBlob), { name: "worker_vcap" });
-      const recvBlob = new Blob([worker_recv_default], { type: "text/javascript" });
-      const recvWorker = new Worker(window.URL.createObjectURL(recvBlob), { name: "worker_recv" });
-      vcapWorker.postMessage({ readable }, [readable]);
-      recvWorker.postMessage({ canvas: offscreenCanvas }, [offscreenCanvas]);
+      StreamStart(mediaStream, offscreenCanvas);
     });
   }
   Main();

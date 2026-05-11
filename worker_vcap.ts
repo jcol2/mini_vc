@@ -4,7 +4,7 @@ let dgramWriter: WritableStreamDefaultWriter<any>;
 let run = 1;
 let frameId = 0;
 
-async function HandleChunk(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): Promise<void>
+async function EncoderCb(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): Promise<void>
 {
  const isKey = chunk.type == "key" ? 1 : 0;
  const headerLn = 10;
@@ -47,7 +47,7 @@ async function HandleChunk(chunk: EncodedVideoChunk, metadata?: EncodedVideoChun
 }
 
 async function
-HandleMsg(Msg: { data: { readable: ReadableStreamDefaultReader<VideoFrame | AudioData> }})
+WorkerMsgCb(Msg: { data: { readable: ReadableStreamDefaultReader<VideoFrame | AudioData> }})
 {
  const reader = Msg.data.readable.getReader();
  const hashBytes: Uint8Array = Uint8Array.fromHex(CertFingerprint);
@@ -67,19 +67,54 @@ HandleMsg(Msg: { data: { readable: ReadableStreamDefaultReader<VideoFrame | Audi
  wt.closed.finally(() => {run = 0});
  dgramWriter = wt.datagrams.writable.getWriter();
 
+ // todo request to publish stream
+
+
+
+ // configure encoder
  const encoder = new VideoEncoder({
-  output: HandleChunk,
+  output: EncoderCb,
   error: console.log,
  });
+ const codecs = [
+  "vp8", // todo temp codec
+  "av01.0.08M.08",
+  "vp09.00.40.08",
+  "avc1.64002a",
+ ];
+ const accelerations: Array<HardwareAcceleration> = ["no-preference", "prefer-hardware", "prefer-software"]; //todo temp nopreference
 
- encoder.configure({
-  height: 720,
-  width: 1280,
-  bitrate: 2_000_000,
-  framerate: 30,
-  codec: "vp8",
-  latencyMode: "realtime",
- });
+ const configs: Array<VideoEncoderConfig> = [];
+ for (const acceleration of accelerations)
+ {
+  for (const codec of codecs)
+  {
+   configs.push({
+    codec,
+    hardwareAcceleration: acceleration,
+    width: 1280,
+    height: 720,
+    bitrate: 2_000_000,
+    bitrateMode: "constant",
+    framerate: 30,
+    latencyMode: "realtime",
+   });
+  }
+ }
+
+ for (const config of configs)
+ {
+  const support: VideoEncoderSupport = await VideoEncoder.isConfigSupported(config);
+  if (support.supported && support.config)
+  {
+   console.log("VideoEncoder using: ", support.config);
+   encoder.configure(support.config);
+   break;
+  }
+ }
+
+
+
  let frameCounter = 0;
  while (run)
  {
@@ -97,6 +132,13 @@ HandleMsg(Msg: { data: { readable: ReadableStreamDefaultReader<VideoFrame | Audi
  console.log("[vcap] exited");
 }
 
-onmessage = HandleMsg;
+function
+WorkerErrCb(err: any)
+{
+ console.error(err);
+}
+
+onmessage = WorkerMsgCb;
+onerror = WorkerErrCb;
 
 export {};

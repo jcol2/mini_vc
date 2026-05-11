@@ -10,7 +10,24 @@
   var jitterBuf = new Array(jitterBufLn).fill(null).map(() => ({ frame: null, timestamp: 0, frameId: 0, metadata: 0 }));
   var jitterBufPlayIdx = 0;
   var jitterBufPlayIdxInit = 0;
-  async function HandleData(receiveStream) {
+  async function WebTransportAlloc() {
+    const hashBytes = Uint8Array.fromHex("df823a1cdf02b7f464865756ad671bf4a9466587f48e9574e7bab1cbb1b9b9e8");
+    const ret = new WebTransport(
+      "https://127.0.0.1:4567/",
+      {
+        allowPooling: false,
+        serverCertificateHashes: [
+          {
+            algorithm: "sha-256",
+            value: hashBytes.buffer
+          }
+        ]
+      }
+    );
+    await ret.ready;
+    return ret;
+  }
+  async function UnidiCb(receiveStream) {
     const reader = receiveStream.getReader();
     const packetBuf = [];
     let catBufLn = 0;
@@ -69,34 +86,21 @@
       }
     }
   }
-  function HandleDecoderOutput(videoFrame) {
+  function DecoderCb(videoFrame) {
     canvas.width = videoFrame.displayWidth;
     canvas.height = videoFrame.displayHeight;
     ctx.drawImage(videoFrame, 0, 0);
     videoFrame.close();
   }
-  function HandleDecoderError(err) {
+  function DecoderErrCb(err) {
     console.error(err);
   }
-  async function HandleMsg(msg) {
+  async function WorkerMsgCb(msg) {
     canvas = msg.data.canvas;
     ctx = canvas.getContext("2d");
-    const hashBytes = Uint8Array.fromHex("df823a1cdf02b7f464865756ad671bf4a9466587f48e9574e7bab1cbb1b9b9e8");
-    wt = new WebTransport(
-      "https://127.0.0.1:4567/",
-      {
-        allowPooling: false,
-        serverCertificateHashes: [
-          {
-            algorithm: "sha-256",
-            value: hashBytes.buffer
-          }
-        ]
-      }
-    );
-    await wt.ready;
+    wt = await WebTransportAlloc();
     let reader = wt.incomingUnidirectionalStreams.getReader();
-    decoder = new VideoDecoder({ output: HandleDecoderOutput, error: HandleDecoderError });
+    decoder = new VideoDecoder({ output: DecoderCb, error: DecoderErrCb });
     decoder.configure({
       codec: "vp8",
       optimizeForLatency: true
@@ -109,18 +113,24 @@
       const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 5e3));
       const res = await Promise.race([reader.read(), timeout]);
       if (res.skip) {
+        console.log("[recv] timeout - skipping");
         await reader.cancel();
         reader.releaseLock();
+        wt.close();
+        wt = await WebTransportAlloc();
         reader = wt.incomingUnidirectionalStreams.getReader();
-        console.log("[recv] timeout - skipping");
         continue;
       }
       if (res.done) {
         break;
       }
-      await HandleData(res.value);
+      await UnidiCb(res.value);
     }
     console.log("[recv] exited");
   }
-  onmessage = HandleMsg;
+  function WorkerErrCb(err) {
+    console.error(err);
+  }
+  onmessage = WorkerMsgCb;
+  onerror = WorkerErrCb;
 })();
