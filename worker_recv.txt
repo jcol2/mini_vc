@@ -15,15 +15,20 @@
     const packetBuf = [];
     let catBufLn = 0;
     for (; ; ) {
-      console.log("[recv] strm wait");
-      const { done, value } = await reader.read();
-      if (done) {
+      const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 1e3));
+      const res = await Promise.race([reader.read(), timeout]);
+      if (res.skip) {
+        console.log("[recv] inner skip");
+        await reader.cancel();
+        reader.releaseLock();
+        return;
+      }
+      if (res.done) {
         break;
       }
-      packetBuf.push(value);
-      catBufLn += value.length;
+      packetBuf.push(res.value);
+      catBufLn += res.value.length;
     }
-    console.log("[recv] my buf ln", catBufLn);
     let catBuf = new Uint8Array(catBufLn);
     let catBufOff = 0;
     for (let I = 0; I < packetBuf.length; ++I) {
@@ -90,7 +95,7 @@
       }
     );
     await wt.ready;
-    const reader = wt.incomingUnidirectionalStreams.getReader();
+    let reader = wt.incomingUnidirectionalStreams.getReader();
     decoder = new VideoDecoder({ output: HandleDecoderOutput, error: HandleDecoderError });
     decoder.configure({
       codec: "vp8",
@@ -101,12 +106,19 @@
       // codedWidth: 1280,
     });
     for (; ; ) {
-      console.log("[recv] wait");
-      const { done, value } = await reader.read();
-      if (done) {
+      const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 5e3));
+      const res = await Promise.race([reader.read(), timeout]);
+      if (res.skip) {
+        await reader.cancel();
+        reader.releaseLock();
+        reader = wt.incomingUnidirectionalStreams.getReader();
+        console.log("[recv] timeout - skipping");
+        continue;
+      }
+      if (res.done) {
         break;
       }
-      await HandleData(value);
+      await HandleData(res.value);
     }
     console.log("[recv] exited");
   }

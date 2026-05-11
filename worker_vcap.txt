@@ -50,7 +50,7 @@
       height: 720,
       width: 1280,
       bitrate: 2e6,
-      framerate: 60,
+      framerate: 30,
       codec: "vp8",
       latencyMode: "realtime"
     });

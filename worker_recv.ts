@@ -28,13 +28,21 @@ HandleData(receiveStream: any)
  for (;;)
  {
   // console.log("[recv] strm wait");
-  const {done, value}: { done: boolean, value: Uint8Array} = await reader.read();
-  if (done)
+  const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 1000));
+  const res = await Promise.race([reader.read(), timeout]) as any;
+  if (res.skip)
+  {
+   console.log("[recv] inner skip");
+   await reader.cancel();
+   reader.releaseLock();
+   return;
+  }
+  if (res.done)
   {
    break;
   }
-  packetBuf.push(value);
-  catBufLn += value.length;
+  packetBuf.push(res.value);
+  catBufLn += res.value.length;
  }
  // console.log("[recv] my buf ln", catBufLn);
 
@@ -127,7 +135,7 @@ HandleMsg(msg: { data: { canvas: OffscreenCanvas }})
   }
  );
  await wt.ready;
- const reader = wt.incomingUnidirectionalStreams.getReader();
+ let reader = wt.incomingUnidirectionalStreams.getReader();
 
  // init decoder
  decoder = new VideoDecoder({output: HandleDecoderOutput, error: HandleDecoderError});
@@ -143,12 +151,21 @@ HandleMsg(msg: { data: { canvas: OffscreenCanvas }})
  for (;;)
  {
   // console.log("[recv] wait");
-  const {done, value} = await reader.read();
-  if (done)
+  const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 5000));
+  const res = await Promise.race([reader.read(), timeout]) as any;
+  if (res.skip)
+  {
+   // await reader.cancel();
+   // reader.releaseLock();
+   // reader = wt.incomingUnidirectionalStreams.getReader();
+   console.log('[recv] timeout - skipping');
+   continue;
+  }
+  if (res.done)
   {
    break;
   }
-  await HandleData(value);
+  await HandleData(res.value);
  }
  console.log("[recv] exited");
 }

@@ -22,7 +22,7 @@
 "use strict";
 (() => {
   // worker_vcap.txt
-  var worker_vcap_default = '"use strict";\n(() => {\n  // worker_vcap.ts\n  var wt;\n  var dgramWriter;\n  var run = 1;\n  var frameId = 0;\n  async function HandleChunk(chunk, metadata) {\n    const isKey = chunk.type == "key" ? 1 : 0;\n    const headerLn = 10;\n    const buf = new Uint8Array(headerLn + chunk.byteLength);\n    chunk.copyTo(buf.subarray(headerLn));\n    const view = new DataView(buf.buffer);\n    view.setUint32(0, frameId, true);\n    view.setUint32(4, 3735928559, true);\n    view.setUint8(8, 0);\n    view.setUint8(9, isKey);\n    const writeStream = await wt.createUnidirectionalStream({ sendOrder: 1 });\n    const writer = writeStream.getWriter();\n    writer.write(buf);\n    writer.releaseLock();\n    writeStream.close();\n    frameId++;\n  }\n  async function HandleMsg(Msg) {\n    const reader = Msg.data.readable.getReader();\n    const hashBytes = Uint8Array.fromHex("df823a1cdf02b7f464865756ad671bf4a9466587f48e9574e7bab1cbb1b9b9e8");\n    wt = new WebTransport(\n      "https://127.0.0.1:4567/",\n      {\n        allowPooling: false,\n        serverCertificateHashes: [\n          {\n            algorithm: "sha-256",\n            value: hashBytes.buffer\n          }\n        ]\n      }\n    );\n    await wt.ready;\n    wt.closed.finally(() => {\n      run = 0;\n    });\n    dgramWriter = wt.datagrams.writable.getWriter();\n    const encoder = new VideoEncoder({\n      output: HandleChunk,\n      error: console.log\n    });\n    encoder.configure({\n      height: 720,\n      width: 1280,\n      bitrate: 2e6,\n      framerate: 60,\n      codec: "vp8",\n      latencyMode: "realtime"\n    });\n    let frameCounter = 0;\n    while (run) {\n      const { done, value } = await reader.read();\n      if (done) return;\n      if (encoder.encodeQueueSize < 3) {\n        const keyFrame = frameCounter % 150 == 0;\n        encoder.encode(value, { keyFrame });\n        frameCounter++;\n      }\n      value.close();\n    }\n    console.log("[vcap]", wt.closed);\n    console.log("[vcap] exited");\n  }\n  onmessage = HandleMsg;\n})();\n';
+  var worker_vcap_default = '"use strict";\n(() => {\n  // worker_vcap.ts\n  var wt;\n  var dgramWriter;\n  var run = 1;\n  var frameId = 0;\n  async function HandleChunk(chunk, metadata) {\n    const isKey = chunk.type == "key" ? 1 : 0;\n    const headerLn = 10;\n    const buf = new Uint8Array(headerLn + chunk.byteLength);\n    chunk.copyTo(buf.subarray(headerLn));\n    const view = new DataView(buf.buffer);\n    view.setUint32(0, frameId, true);\n    view.setUint32(4, 3735928559, true);\n    view.setUint8(8, 0);\n    view.setUint8(9, isKey);\n    const writeStream = await wt.createUnidirectionalStream({ sendOrder: 1 });\n    const writer = writeStream.getWriter();\n    writer.write(buf);\n    writer.releaseLock();\n    writeStream.close();\n    frameId++;\n  }\n  async function HandleMsg(Msg) {\n    const reader = Msg.data.readable.getReader();\n    const hashBytes = Uint8Array.fromHex("df823a1cdf02b7f464865756ad671bf4a9466587f48e9574e7bab1cbb1b9b9e8");\n    wt = new WebTransport(\n      "https://127.0.0.1:4567/",\n      {\n        allowPooling: false,\n        serverCertificateHashes: [\n          {\n            algorithm: "sha-256",\n            value: hashBytes.buffer\n          }\n        ]\n      }\n    );\n    await wt.ready;\n    wt.closed.finally(() => {\n      run = 0;\n    });\n    dgramWriter = wt.datagrams.writable.getWriter();\n    const encoder = new VideoEncoder({\n      output: HandleChunk,\n      error: console.log\n    });\n    encoder.configure({\n      height: 720,\n      width: 1280,\n      bitrate: 2e6,\n      framerate: 30,\n      codec: "vp8",\n      latencyMode: "realtime"\n    });\n    let frameCounter = 0;\n    while (run) {\n      const { done, value } = await reader.read();\n      if (done) return;\n      if (encoder.encodeQueueSize < 3) {\n        const keyFrame = frameCounter % 150 == 0;\n        encoder.encode(value, { keyFrame });\n        frameCounter++;\n      }\n      value.close();\n    }\n    console.log("[vcap]", wt.closed);\n    console.log("[vcap] exited");\n  }\n  onmessage = HandleMsg;\n})();\n';
 
   // worker_recv.txt
   var worker_recv_default = `"use strict";
@@ -42,15 +42,20 @@
     const packetBuf = [];
     let catBufLn = 0;
     for (; ; ) {
-      console.log("[recv] strm wait");
-      const { done, value } = await reader.read();
-      if (done) {
+      const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 1e3));
+      const res = await Promise.race([reader.read(), timeout]);
+      if (res.skip) {
+        console.log("[recv] inner skip");
+        await reader.cancel();
+        reader.releaseLock();
+        return;
+      }
+      if (res.done) {
         break;
       }
-      packetBuf.push(value);
-      catBufLn += value.length;
+      packetBuf.push(res.value);
+      catBufLn += res.value.length;
     }
-    console.log("[recv] my buf ln", catBufLn);
     let catBuf = new Uint8Array(catBufLn);
     let catBufOff = 0;
     for (let I = 0; I < packetBuf.length; ++I) {
@@ -117,7 +122,7 @@
       }
     );
     await wt.ready;
-    const reader = wt.incomingUnidirectionalStreams.getReader();
+    let reader = wt.incomingUnidirectionalStreams.getReader();
     decoder = new VideoDecoder({ output: HandleDecoderOutput, error: HandleDecoderError });
     decoder.configure({
       codec: "vp8",
@@ -128,12 +133,19 @@
       // codedWidth: 1280,
     });
     for (; ; ) {
-      console.log("[recv] wait");
-      const { done, value } = await reader.read();
-      if (done) {
+      const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 5e3));
+      const res = await Promise.race([reader.read(), timeout]);
+      if (res.skip) {
+        await reader.cancel();
+        reader.releaseLock();
+        reader = wt.incomingUnidirectionalStreams.getReader();
+        console.log("[recv] timeout - skipping");
+        continue;
+      }
+      if (res.done) {
         break;
       }
-      await HandleData(value);
+      await HandleData(res.value);
     }
     console.log("[recv] exited");
   }
