@@ -133,6 +133,41 @@ MyConFree(my_con *MyCon)
  OsRwMutexDrop(MySrvRwMtx, 1);
 }
 
+static frame_chunk *
+FrameChunkPush(my_con *MyCon, my_stream *MyStream)
+{
+ DWORD ThreadId = GetCurrentThreadId();
+ ThreadId;
+ OsRwMutexTake(MyCon->RwMtx, 1);
+
+ frame_chunk *Chunk = MyCon->FreeFrameChunk;
+ if (Chunk)
+ {
+  SLLStackPop(MyCon->FreeFrameChunk);
+ }
+ else
+ {
+  Chunk = ArPush(MyCon->Ar, frame_chunk, 1);
+ }
+ Chunk->MyStream = MyStream;
+
+ OsRwMutexDrop(MyCon->RwMtx, 1);
+
+ DLLPushBack(MyStream->FirstChunk, MyStream->LastChunk, Chunk);
+
+ return Chunk;
+}
+
+static void
+FrameChunkFree(my_con *MyCon, frame_chunk *Chunk)
+{
+ DLLRemove(Chunk->MyStream->FirstChunk, Chunk->MyStream->LastChunk, Chunk);
+ MemoryZeroStruct(Chunk);
+ OsRwMutexTake(MyCon->RwMtx, 1);
+ SLLStackPush(MyCon->FreeFrameChunk, Chunk);
+ OsRwMutexDrop(MyCon->RwMtx, 1);
+}
+
 static my_stream *
 MyStreamPush(my_con *MyCon, uint32_t IsInStream)
 {
@@ -168,10 +203,19 @@ MyStreamPush(my_con *MyCon, uint32_t IsInStream)
 }
 
 static void
-MyStreamFree(my_stream *MyStream)
+MyStreamFree(QUIC_API_TABLE *MsQuic, my_stream *MyStream)
 {
  my_con *MyCon = MyStream->MyCon;
- StreamFree(&MyStream->Stream);
+ WtLogErr("[STRM][%p][%zd] Freeing stream\n", MyStream->Stream.QStream, MyStream->Stream.Id);
+ if (MyStream->FirstChunk)
+ {
+  WtLogErr("[STRM][%p][%zd] ERROR: Chunks found in freed stream!!!\n", MyStream->Stream.QStream, MyStream->Stream.Id);
+  while (MyStream->FirstChunk)
+  {
+   FrameChunkFree(MyCon, MyStream->FirstChunk);
+  }
+ }
+ StreamFree(MsQuic, &MyStream->Stream);
 
  OsRwMutexTake(MyCon->RwMtx, 1);
 
@@ -191,41 +235,6 @@ MyStreamFree(my_stream *MyStream)
 
 #define MyInStreamPush(MyCon) MyStreamPush(MyCon, 1)
 #define MyOutStreamPush(MyCon) MyStreamPush(MyCon, 0)
-
-static frame_chunk *
-FrameChunkPush(my_con *MyCon, my_stream *MyStream)
-{
- DWORD ThreadId = GetCurrentThreadId();
- ThreadId;
- OsRwMutexTake(MyCon->RwMtx, 1);
-
- frame_chunk *Chunk = MyCon->FreeFrameChunk;
- if (Chunk)
- {
-  SLLStackPop(MyCon->FreeFrameChunk);
- }
- else
- {
-  Chunk = ArPush(MyCon->Ar, frame_chunk, 1);
- }
- Chunk->MyStream = MyStream;
-
- OsRwMutexDrop(MyCon->RwMtx, 1);
-
- DLLPushBack(MyStream->FirstChunk, MyStream->LastChunk, Chunk);
-
- return Chunk;
-}
-
-static void
-FrameChunkFree(my_con *MyCon, frame_chunk *Chunk)
-{
- DLLRemove(Chunk->MyStream->FirstChunk, Chunk->MyStream->LastChunk, Chunk);
- MemoryZeroStruct(Chunk);
- OsRwMutexTake(MyCon->RwMtx, 1);
- SLLStackPush(MyCon->FreeFrameChunk, Chunk);
- OsRwMutexDrop(MyCon->RwMtx, 1);
-}
 
 static void
 StreamStatsGet(QUIC_API_TABLE *MsQuic, my_stream *MyStream)
@@ -274,6 +283,11 @@ static QUIC_STATUS
 MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
  my_stream *MyStream = Ctx;
+ if (!(MyStream && MyStream->MyCon && MyStream->Stream.Con && MyStream->Stream.Con->Srv && MyStream->Stream.Con->Srv->MsQuic))
+ {
+  WtLogErr("[STRM] Error: Ctx missing in MyUnidiCb!\n");
+  return QUIC_STATUS_SUCCESS;
+ }
  frame_header_buf *FrameHeaderBuf = &MyStream->FrameHeader;
  QUIC_API_TABLE *MsQuic = MyStream->Stream.Con->Srv->MsQuic;
  WtUnidiCb(QStream, &MyStream->Stream, Event);
@@ -310,22 +324,43 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
     OsRwMutexTake(MyStream->MyCon->MySrv->RwMtx, 0);
     for (my_con *MyConNode = MyStream->MyCon->MySrv->First; MyConNode; MyConNode = MyConNode->Next)
     {
-     OsRwMutexTake(MyStream->MyCon->RwMtx, 0);
+     my_stream *OutStream = 0;
      if (MyConNode != MyStream->MyCon)
      {
+      OsRwMutexTake(MyConNode->RwMtx, 1);
       // find stream with owning stream id
-      my_stream *OutStream = 0;
+      size_t OutStreamLn = 0;
       for (my_stream *MyStreamNode = MyConNode->FirstOut; MyStreamNode; MyStreamNode = MyStreamNode->Next)
       {
-       if (FrameHeaderIsReady(&MyStreamNode->FrameHeader) && MyStreamNode->OwningStreamId == MyStream->Stream.Id)
+       // cancel old streams
+       if (MyStreamNode->FrameHeader.Header.FrameId < (Max(FrameHeaderBuf->Header.FrameId, 6) - 6))
+       {
+        StreamSendShutdown(MsQuic, MyStreamNode->Stream.QStream, H3ErrNoError);
+       }
+       else if (FrameHeaderIsReady(&MyStreamNode->FrameHeader) && MyStreamNode->OwningStreamId == MyStream->Stream.Id)
        {
         OutStream = MyStreamNode;
-        break;
+        OutStreamLn++;
+       }
+       else
+       {
+        OutStreamLn++;
        }
       }
 
+      // cancel if too many streams regardless of stream id
+      // this should only be run if the same stream id is being spammed for some reason
+      size_t StreamCancelCnt = Max(OutStreamLn, 6) - 6;
+      for (my_stream *MyStreamNode = MyConNode->LastOut; MyStreamNode && StreamCancelCnt; MyStreamNode = MyStreamNode->Prev)
+      {
+       StreamSendShutdown(MsQuic, MyStreamNode->Stream.QStream, H3ErrNoError);
+       StreamCancelCnt--;
+      }
+      OsRwMutexDrop(MyConNode->RwMtx, 1);
+
       if (!OutStream)
       {
+       // create out stream
        WtLogDebug("[STRM][%p][%zd] Creating stream\n", QStream, MyStream->Stream.Id);
        OutStream = MyOutStreamPush(MyConNode);
        OutStream->FrameHeader = *FrameHeaderBuf;
@@ -388,6 +423,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        }
       }
 
+      // forward empty buffer with FIN
       // bufs can be modified so can't rely on Event->RECEIVE.TotalBufferLength
       // therefore calc totalbufln
       size_t TotalBufLn = 0;
@@ -401,7 +437,6 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        MyStreamSendChunk(MsQuic, OutStream, 0, 0, QUIC_SEND_FLAG_FIN);
       }
      }
-     OsRwMutexDrop(MyStream->MyCon->RwMtx, 0);
     }
     OsRwMutexDrop(MyStream->MyCon->MySrv->RwMtx, 0);
    }
@@ -410,7 +445,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  else if (Event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE)
  {
   WtLogDebug("[STRM][%p][%zd][%d] Unidi peer stream shutdown, remotely: %d, by app: %d\n", QStream, MyStream->Stream.Id, GetCurrentThreadId(), Event->SHUTDOWN_COMPLETE.ConnectionClosedRemotely, Event->SHUTDOWN_COMPLETE.ConnectionShutdownByApp);
-  MyStreamFree(MyStream);
+  MyStreamFree(MsQuic, MyStream);
  }
  else if (Event->Type == QUIC_STREAM_EVENT_SEND_COMPLETE)
  {
@@ -446,15 +481,20 @@ static QUIC_STATUS
 MyBidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
  my_stream *MyStream = Ctx;
- 
+ if (!(MyStream && MyStream->MyCon && MyStream->Stream.Con && MyStream->Stream.Con->Srv && MyStream->Stream.Con->Srv->MsQuic))
+ {
+  WtLogErr("[STRM] Error: Ctx missing in MyBidiCb!\n");
+  return QUIC_STATUS_SUCCESS;
+ }
+ QUIC_API_TABLE *MsQuic = MyStream->Stream.Con->Srv->MsQuic;
+
  WtBidiCb(QStream, &MyStream->Stream, Event);
 
  if (Event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE)
  {
   WtLogDebug("[STRM][%p][%zd][%d] Bidi peer stream shutdown, remotely: %d, by app: %d\n", QStream, MyStream->Stream.Id, GetCurrentThreadId(), Event->SHUTDOWN_COMPLETE.ConnectionClosedRemotely, Event->SHUTDOWN_COMPLETE.ConnectionShutdownByApp);
-  MyStreamFree(MyStream);
+  MyStreamFree(MsQuic, MyStream);
  }
-
  return QUIC_STATUS_SUCCESS;
 }
 

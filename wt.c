@@ -302,7 +302,7 @@ enum
  WtLogLvlWarn = 8,
  WtLogLvlErr = 16,
 };
-#define WtCurLogLvl WtLogLvlDebug
+#define WtCurLogLvl WtLogLvlWarn
 
 static void
 WtLog(uint32_t Lvl, char *Fmt, ...)
@@ -723,7 +723,7 @@ static void
 StreamSendShutdown(QUIC_API_TABLE *MsQuic, HQUIC Stream, int32_t StatusCode)
 {
  WtLog(WtLogLvlDebug, "[STRM][%p] STREAM SHUTDOWN CALLED\n", Stream);
- MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND | QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE, StatusCode);
+ MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE | QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND | QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE, StatusCode);
 }
 
 static void
@@ -1023,14 +1023,16 @@ StreamPush(size_t Id, wt_con *Con, wt_stream *Stream)
 }
 
 static void
-StreamFree(wt_stream *Stream)
+StreamFree(QUIC_API_TABLE *MsQuic, wt_stream *Stream)
 {
  OsRwMutexTake(Stream->Con->RwMtx, 1);
+ if (Stream->QStream)
  {
-  if (Stream->Req)
-  {
-   SLLStackPush(Stream->Con->FreeReq, Stream->Req);
-  }
+  MsQuic->StreamClose(Stream->QStream);
+ }
+ if (Stream->Req)
+ {
+  SLLStackPush(Stream->Con->FreeReq, Stream->Req);
  }
  OsRwMutexDrop(Stream->Con->RwMtx, 1);
 }
@@ -1225,6 +1227,7 @@ static QUIC_STATUS
 WtUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
  wt_stream *Stream = (wt_stream *)Ctx;
+ Stream->QStream = QStream;
  QUIC_API_TABLE *MsQuic = Stream->Con->Srv->MsQuic;
 
  if (Event->Type == QUIC_STREAM_EVENT_RECEIVE)
@@ -1305,8 +1308,6 @@ WtUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  }
  else if (Event->Type == QUIC_STREAM_EVENT_START_COMPLETE)
  {
-  Stream->QStream = QStream;
-
   // assign stream id for outgoing streams for logging
   // client initiated streams must wait to assign stream id
   // todo change ^^^?
@@ -1573,7 +1574,7 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
   }
   else
   {
-   StreamFree(Stream);
+   StreamFree(MsQuic, Stream);
    ConnectionShutdown(MsQuic, QCon, H3ErrInternalError);
   }
   break;
