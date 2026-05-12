@@ -126,10 +126,7 @@ UnidiCb(receiveStream: any)
     // console.log("[recv] queuing decode");
     decoder.decode(decodeChunk.frame);
    }
-   else
-   {
-    // console.log("[recv] nonkeyframe?", decodeChunk);
-   }
+   decodeChunk.frame = null;
    jitterBufPlayIdx++;
    jitterBufPlayIdx %= jitterBufMask;
   }
@@ -149,9 +146,9 @@ DecoderCb(videoFrame: VideoFrame)
  canvas.width = width;
  canvas.height = height;
 
- const fov = 60 * Math.PI / 180;  // 60 degrees in radians
+ const fov = 90 * Math.PI / 180;  // 60 degrees in radians
  const aspect = width / height;
- const zNear  = 1;
+ const zNear  = 0;
  const zFar   = 2000;
  const projectionMatrix = mat4.perspective(fov, aspect, zNear, zFar);
 
@@ -181,14 +178,14 @@ DecoderCb(videoFrame: VideoFrame)
 
  const xSpacing = 0.0;
  const ySpacing = 0.0;
- const zDepth = 1;
+ const zDepth = -3.0;
 
  const x = -.5;
  const y = 1;
 
  mat4.translate(viewProjectionMatrix, [x * xSpacing, y * ySpacing, -zDepth * 0.5], matrix);
- mat4.rotateX(matrix, 0.25 * Math.PI * Math.sign(y), matrix);
- mat4.scale(matrix, [-5, -5, 1], matrix);
+ // mat4.rotateX(matrix, 0.25 * Math.PI * Math.sign(y), matrix);
+ mat4.scale(matrix, [-aspect, -1, 1], matrix);
  mat4.translate(matrix, [-0.5, -0.5, 0], matrix);
 
  // copy the values from JavaScript to the GPU

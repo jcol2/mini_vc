@@ -3443,8 +3443,8 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
         if (jitterBufGotFirstFrame || decodeChunk.metadata & metadataFlagIsKey) {
           jitterBufGotFirstFrame = 1;
           decoder.decode(decodeChunk.frame);
-        } else {
         }
+        decodeChunk.frame = null;
         jitterBufPlayIdx++;
         jitterBufPlayIdx %= jitterBufMask;
       } else {
@@ -3457,9 +3457,9 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
     const height = videoFrame.displayHeight;
     canvas.width = width;
     canvas.height = height;
-    const fov = 60 * Math.PI / 180;
+    const fov = 90 * Math.PI / 180;
     const aspect = width / height;
-    const zNear = 1;
+    const zNear = 0;
     const zFar = 2e3;
     const projectionMatrix = mat4.perspective(fov, aspect, zNear, zFar);
     const cameraPosition = [0, 0, 2];
@@ -3482,12 +3482,11 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
     });
     const xSpacing = 0;
     const ySpacing = 0;
-    const zDepth = 1;
+    const zDepth = -3;
     const x = -0.5;
     const y = 1;
     mat4.translate(viewProjectionMatrix, [x * xSpacing, y * ySpacing, -zDepth * 0.5], matrix);
-    mat4.rotateX(matrix, 0.25 * Math.PI * Math.sign(y), matrix);
-    mat4.scale(matrix, [-5, -5, 1], matrix);
+    mat4.scale(matrix, [-aspect, -1, 1], matrix);
     mat4.translate(matrix, [-0.5, -0.5, 0], matrix);
     device.queue.writeBuffer(uniBuf, 0, uniVals);
     pass.setBindGroup(0, bindGroup);
