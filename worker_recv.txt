@@ -3600,6 +3600,22 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
         }
       ]
     };
+    {
+      const texView = ctx.getCurrentTexture().createView();
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: texView,
+            clearValue: [0.3, 0.3, 0.3, 1],
+            loadOp: "clear",
+            storeOp: "store"
+          }
+        ]
+      });
+      pass.end();
+      device.queue.submit([encoder.finish()]);
+    }
     wt = await WebTransportAlloc();
     let reader = wt.incomingUnidirectionalStreams.getReader();
     decoder = new VideoDecoder({ output: DecoderCb, error: DecoderErrCb });

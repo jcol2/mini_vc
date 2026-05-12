@@ -319,6 +319,24 @@ WorkerMsgCb(msg: { data: { canvas: OffscreenCanvas }})
   ],
  };
 
+ {
+  // clear screen while getting video
+  const texView = ctx.getCurrentTexture().createView();
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginRenderPass({
+   colorAttachments: [
+    {
+     view: texView,
+     clearValue: [0.3, 0.3, 0.3, 1.0],
+     loadOp: "clear",
+     storeOp: "store",
+    },
+   ],
+  });
+  pass.end();
+  device.queue.submit([encoder.finish()]);
+ }
+
 
 
  // wt init
