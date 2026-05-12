@@ -325,7 +325,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
     for (my_con *MyConNode = MyStream->MyCon->MySrv->First; MyConNode; MyConNode = MyConNode->Next)
     {
      my_stream *OutStream = 0;
-     if (MyConNode != MyStream->MyCon)
+     if (MyConNode != MyStream->MyCon && MyConNode->Con.SessionStream && MyConNode->Con.SessionStream->Id != UINT64_MAX)
      {
       OsRwMutexTake(MyConNode->RwMtx, 1);
       // find stream with owning stream id
