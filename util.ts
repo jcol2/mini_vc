@@ -1,3 +1,56 @@
+// shared worker utils
+export const sendOrderDefault = 1;
+export const sendOrderKeyframe = 5;
+export const sendOrderAudio = 10;
+
+export const headerFrame = 0;
+export const headerPub = 1;
+export const headerSub = 2;
+
+export interface jitter_buf_el
+{
+ frame: EncodedVideoChunk | null,
+ frameId: number,
+ timestamp: number,
+ metadata: number,
+};
+
+export const frameHeaderLn = 11;
+
+export function
+FrameHeaderRead(view: DataView, jitterBuf: Array<jitter_buf_el>, jitterBufMask: number): number
+{
+ const frameId = view.getUint32(1, true);
+ const timestampUs = view.getUint32(5, true);
+ const trackId = view.getUint8(9); // todo handle multiple tracks?
+ const metadata = view.getUint8(10);
+ const jitterBufWriteIdx = frameId & jitterBufMask;
+ const jitterBufEl = jitterBuf[jitterBufWriteIdx];
+ jitterBufEl.frameId = frameId;
+ jitterBufEl.timestamp = timestampUs;
+ jitterBufEl.metadata = metadata;
+ return jitterBufWriteIdx;
+}
+
+export function
+FrameHeaderWrite(v: DataView, frameId: number, timestampUs: number, trackId: number, metadata: number): void
+{
+ v.setUint8(0, headerFrame);
+ v.setUint32(1, frameId, true);
+ v.setUint32(5, timestampUs, true);
+ v.setUint8(9, trackId);
+ v.setUint8(10, metadata);
+}
+
+// todo decide pub header shape
+export function
+PubHeaderWrite(v: DataView): void
+{
+ v.setUint8(0, headerPub);
+}
+
+
+
 // Polyfill from https://github.com/sb2702/webcodecs-utils/blob/main/src/polyfills/media-stream-track-processor.ts
 
 

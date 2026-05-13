@@ -1,13 +1,6 @@
-import { mat4 } from "./util";
+import { frameHeaderLn, FrameHeaderRead, headerFrame, jitter_buf_el, mat4 } from "./util";
 
 declare const CertFingerprint: string;
-interface jitter_buf_el
-{
- frame: EncodedVideoChunk | null,
- frameId: number,
- timestamp: number,
- metadata: number,
-};
 const metadataFlagIsKey = 0x1;
 
 let wt: WebTransport;
@@ -23,9 +16,9 @@ let uniVals: Float32Array<ArrayBuffer>;
 let matrix: Float32Array<ArrayBuffer>;
 let renderPassDescriptor: GPURenderPassDescriptor;
 
-const jitterBufLn = 256;
-const jitterBufMask = jitterBufLn - 1;
-const jitterBuf: Array<jitter_buf_el> = new Array(jitterBufLn).fill(null).map(() => ({ frame: null, timestamp: 0, frameId: 0, metadata: 0 }));
+export const jitterBufLn = 256;
+export const jitterBufMask = jitterBufLn - 1;
+export const jitterBuf: Array<jitter_buf_el> = new Array(jitterBufLn).fill(null).map(() => ({ frame: null, timestamp: 0, frameId: 0, metadata: 0 }));
 let jitterBufPlayIdx = 0;
 let jitterBufPlayIdxInit = 0;
 let jitterBufGotFirstFrame = 0;
@@ -90,52 +83,47 @@ UnidiCb(receiveStream: any)
 
  // insert into jitter buf
  const catView = new DataView(catBuf.buffer);
- const frameId = catView.getUint32(0, true);
- const timestampMs = catView.getUint32(4, true);
- const trackId = catView.getUint8(8); // todo handle multiple tracks?
- const metadata = catView.getUint8(9);
- const jitterBufWriteIdx = frameId & jitterBufMask;
- const jitterBufEl = jitterBuf[jitterBufWriteIdx];
- jitterBufEl.frameId = frameId;
- jitterBufEl.timestamp = timestampMs;
- jitterBufEl.metadata = metadata;
- 
- const frameHeaderLn = 10;
- jitterBufEl.frame = new EncodedVideoChunk({
-  data: new DataView(catBuf.buffer, frameHeaderLn), 
-  timestamp: timestampMs, 
-  type: metadata & metadataFlagIsKey ? "key" : "delta",
-  // todo specify duration
- });
- 
- if (!jitterBufPlayIdxInit)
+ const headerType = catView.getUint8(0);
+ if (headerType === headerFrame)
  {
-  jitterBufPlayIdxInit = 1;
-  jitterBufPlayIdx = jitterBufWriteIdx;
- }
- const delta = jitterBufWriteIdx >= jitterBufPlayIdx ? jitterBufWriteIdx - jitterBufPlayIdx : jitterBufLn - jitterBufPlayIdx + jitterBufWriteIdx;
- if (delta > 6)
- {
-  const decodeChunk = jitterBuf[jitterBufPlayIdx];
-  if (decodeChunk.frame)
+  const jitterBufWriteIdx = FrameHeaderRead(catView, jitterBuf, jitterBufMask);
+  const jitterBufEl = jitterBuf[jitterBufWriteIdx];
+  
+  jitterBufEl.frame = new EncodedVideoChunk({
+   data: new DataView(catBuf.buffer, frameHeaderLn), 
+   timestamp: jitterBufEl.timestamp, 
+   type: jitterBufEl.metadata & metadataFlagIsKey ? "key" : "delta",
+   // todo specify duration
+  });
+  
+  if (!jitterBufPlayIdxInit)
   {
-   // first frame decoded must be a keyframe
-   if (jitterBufGotFirstFrame || (decodeChunk.metadata & metadataFlagIsKey))
+   jitterBufPlayIdxInit = 1;
+   jitterBufPlayIdx = jitterBufWriteIdx;
+  }
+  const delta = jitterBufWriteIdx >= jitterBufPlayIdx ? jitterBufWriteIdx - jitterBufPlayIdx : jitterBufLn - jitterBufPlayIdx + jitterBufWriteIdx;
+  if (delta > 6)
+  {
+   const decodeChunk = jitterBuf[jitterBufPlayIdx];
+   if (decodeChunk.frame)
    {
-    jitterBufGotFirstFrame = 1;
-    // console.log("[recv] queuing decode");
-    decoder.decode(decodeChunk.frame);
+    // first frame decoded must be a keyframe
+    if (jitterBufGotFirstFrame || (decodeChunk.metadata & metadataFlagIsKey))
+    {
+     jitterBufGotFirstFrame = 1;
+     // console.log("[recv] queuing decode");
+     decoder.decode(decodeChunk.frame);
+    }
+    decodeChunk.frame = null;
+    jitterBufPlayIdx++;
+    jitterBufPlayIdx %= jitterBufMask;
    }
-   decodeChunk.frame = null;
-   jitterBufPlayIdx++;
-   jitterBufPlayIdx %= jitterBufMask;
-  }
-  else
-  {
-   console.error("[recv] Error no video chunk at play idx");
+   else
+   {
+    console.error("[recv] Error no video chunk at play idx");
+   }
   }
  }
- 
 }
 
 function

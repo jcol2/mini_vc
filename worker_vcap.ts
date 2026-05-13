@@ -1,3 +1,5 @@
+import { frameHeaderLn, FrameHeaderWrite, sendOrderAudio, sendOrderDefault, sendOrderKeyframe } from "./util";
+
 declare const CertFingerprint: string;
 let wt: WebTransport;
 let dgramWriter: WritableStreamDefaultWriter<any>;
@@ -7,21 +9,13 @@ let frameId = 0;
 async function EncoderCb(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): Promise<void>
 {
  const isKey = chunk.type == "key" ? 1 : 0;
- const headerLn = 10;
- const buf = new Uint8Array(headerLn + chunk.byteLength);
- chunk.copyTo(buf.subarray(headerLn));
+ const buf = new Uint8Array(frameHeaderLn + chunk.byteLength);
+ chunk.copyTo(buf.subarray(frameHeaderLn));
  const view = new DataView(buf.buffer);
- // set frame id
- view.setUint32(0, frameId, true);
- // set timestamp
- view.setUint32(4, 0xdeadbeef, true);
- // set track id
- view.setUint8(8, 0);
- // set metadata
- view.setUint8(9, isKey);
- // console.log("[vcap] Sending length: ", buf.length);
+ FrameHeaderWrite(view, frameId, chunk.timestamp, 0, isKey); //todo proper trackid
+// console.log("[vcap] Sending length: ", buf.length);
 
- const writeStream: WritableStream<any> = await wt.createUnidirectionalStream({sendOrder: 1});
+ const writeStream: WritableStream<any> = await wt.createUnidirectionalStream({sendOrder: isKey ? sendOrderKeyframe : sendOrderDefault});
  const writer = writeStream.getWriter();
  writer.write(buf);
  writer.releaseLock();
@@ -68,6 +62,22 @@ WorkerMsgCb(Msg: { data: { readable: ReadableStreamDefaultReader<VideoFrame | Au
  dgramWriter = wt.datagrams.writable.getWriter();
 
  // todo request to publish stream
+ // {
+ //  const buf = new Uint8Array(100);
+ //  // chunk.copyTo(buf.subarray(headerLn));
+ //  const view = new DataView(buf.buffer);
+ //  // set req type
+ //  view.setUint32(0, frameId, true);
+
+ //  const thing = await wt.createBidirectionalStream({sendOrder: sendOrderAudio});
+ //  const writer = thing.writable.getWriter();
+ //  writer.write(buf);
+ //  writer.releaseLock();
+ //  const reader = thing.readable.getReader();
+ //  const res = await reader.read();
+ //  res.done;
+ //  res.value;
+ // }
 
 
 

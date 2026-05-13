@@ -1,6 +1,20 @@
 "use strict";
 (() => {
   // util.ts
+  var headerFrame = 0;
+  var frameHeaderLn = 11;
+  function FrameHeaderRead(view, jitterBuf2, jitterBufMask2) {
+    const frameId = view.getUint32(1, true);
+    const timestampUs = view.getUint32(5, true);
+    const trackId = view.getUint8(9);
+    const metadata = view.getUint8(10);
+    const jitterBufWriteIdx = frameId & jitterBufMask2;
+    const jitterBufEl = jitterBuf2[jitterBufWriteIdx];
+    jitterBufEl.frameId = frameId;
+    jitterBufEl.timestamp = timestampUs;
+    jitterBufEl.metadata = metadata;
+    return jitterBufWriteIdx;
+  }
   var AUDIO_WORKLET_CODE = `
 class AudioCaptureProcessor extends AudioWorkletProcessor {
   sampleCount = 0;
@@ -3373,7 +3387,7 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
   var jitterBufPlayIdxInit = 0;
   var jitterBufGotFirstFrame = 0;
   async function WebTransportAlloc() {
-    const hashBytes = Uint8Array.fromHex("df823a1cdf02b7f464865756ad671bf4a9466587f48e9574e7bab1cbb1b9b9e8");
+    const hashBytes = Uint8Array.fromHex("8142935cf816ade736327aab0b8de1f7c00292a8abac2c1dd9c450bd3a92c8cf");
     const ret = new WebTransport(
       "https://127.0.0.1:4567/",
       {
@@ -3416,39 +3430,34 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
       catBufOff += buf.length;
     }
     const catView = new DataView(catBuf.buffer);
-    const frameId = catView.getUint32(0, true);
-    const timestampMs = catView.getUint32(4, true);
-    const trackId = catView.getUint8(8);
-    const metadata = catView.getUint8(9);
-    const jitterBufWriteIdx = frameId & jitterBufMask;
-    const jitterBufEl = jitterBuf[jitterBufWriteIdx];
-    jitterBufEl.frameId = frameId;
-    jitterBufEl.timestamp = timestampMs;
-    jitterBufEl.metadata = metadata;
-    const frameHeaderLn = 10;
-    jitterBufEl.frame = new EncodedVideoChunk({
-      data: new DataView(catBuf.buffer, frameHeaderLn),
-      timestamp: timestampMs,
-      type: metadata & metadataFlagIsKey ? "key" : "delta"
-      // todo specify duration
-    });
-    if (!jitterBufPlayIdxInit) {
-      jitterBufPlayIdxInit = 1;
-      jitterBufPlayIdx = jitterBufWriteIdx;
-    }
-    const delta = jitterBufWriteIdx >= jitterBufPlayIdx ? jitterBufWriteIdx - jitterBufPlayIdx : jitterBufLn - jitterBufPlayIdx + jitterBufWriteIdx;
-    if (delta > 6) {
-      const decodeChunk = jitterBuf[jitterBufPlayIdx];
-      if (decodeChunk.frame) {
-        if (jitterBufGotFirstFrame || decodeChunk.metadata & metadataFlagIsKey) {
-          jitterBufGotFirstFrame = 1;
-          decoder.decode(decodeChunk.frame);
+    const headerType = catView.getUint8(0);
+    if (headerType === headerFrame) {
+      const jitterBufWriteIdx = FrameHeaderRead(catView, jitterBuf, jitterBufMask);
+      const jitterBufEl = jitterBuf[jitterBufWriteIdx];
+      jitterBufEl.frame = new EncodedVideoChunk({
+        data: new DataView(catBuf.buffer, frameHeaderLn),
+        timestamp: jitterBufEl.timestamp,
+        type: jitterBufEl.metadata & metadataFlagIsKey ? "key" : "delta"
+        // todo specify duration
+      });
+      if (!jitterBufPlayIdxInit) {
+        jitterBufPlayIdxInit = 1;
+        jitterBufPlayIdx = jitterBufWriteIdx;
+      }
+      const delta = jitterBufWriteIdx >= jitterBufPlayIdx ? jitterBufWriteIdx - jitterBufPlayIdx : jitterBufLn - jitterBufPlayIdx + jitterBufWriteIdx;
+      if (delta > 6) {
+        const decodeChunk = jitterBuf[jitterBufPlayIdx];
+        if (decodeChunk.frame) {
+          if (jitterBufGotFirstFrame || decodeChunk.metadata & metadataFlagIsKey) {
+            jitterBufGotFirstFrame = 1;
+            decoder.decode(decodeChunk.frame);
+          }
+          decodeChunk.frame = null;
+          jitterBufPlayIdx++;
+          jitterBufPlayIdx %= jitterBufMask;
+        } else {
+          console.error("[recv] Error no video chunk at play idx");
         }
-        decodeChunk.frame = null;
-        jitterBufPlayIdx++;
-        jitterBufPlayIdx %= jitterBufMask;
-      } else {
-        console.error("[recv] Error no video chunk at play idx");
       }
     }
   }
@@ -3482,11 +3491,10 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
     });
     const xSpacing = 0;
     const ySpacing = 0;
-    const zDepth = -1;
+    const zDepth = -3;
     const x = -0.5;
     const y = 1;
     mat4.translate(viewProjectionMatrix, [x * xSpacing, y * ySpacing, -zDepth * 0.5], matrix);
-    mat4.rotateX(matrix, 0.25 * Math.PI * Math.sign(y), matrix);
     mat4.scale(matrix, [-aspect, -1, 1], matrix);
     mat4.translate(matrix, [-0.5, -0.5, 0], matrix);
     device.queue.writeBuffer(uniBuf, 0, uniVals);

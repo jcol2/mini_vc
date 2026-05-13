@@ -1,15 +1,42 @@
 #include "wt.c"
 
+typedef uint8_t header_kind;
+enum
+{
+ HeaderFrame,
+ HeaderPub,
+ HeaderSub,
+};
+
 #pragma pack(push, 1)
 typedef struct frame_header frame_header;
 struct frame_header
 {
+ header_kind FrameType;
  uint32_t FrameId;
- uint32_t TimestampMs;
+ uint32_t TimeStampUs;
  uint8_t TrackId;
  uint8_t Metadata;
 };
 #pragma pack(pop)
+
+#pragma pack(push, 1)
+typedef struct pub_header pub_header;
+struct pub_header
+{
+ header_kind FrameType;
+};
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+typedef struct sub_header sub_header;
+struct sub_header
+{
+ header_kind FrameType;
+ uint32_t Ln;
+};
+#pragma pack(pop)
+
 
 typedef struct frame_header_buf frame_header_buf;
 struct frame_header_buf
@@ -84,6 +111,16 @@ struct my_stream
 };
 
 #define FrameHeaderIsReady(U64Buf) ((U64Buf)->Ln == sizeof((U64Buf)->Mem))
+
+// Getters needed for unaligned access
+static uint32_t
+FrameHeaderGetFrameId(frame_header_buf *Buf)
+{
+ uint32_t Ret = 0;
+ StaticAssert(ret_geq_frame_id, sizeof(Ret) >= sizeof(Buf->Header.FrameId));
+ memcpy(&Ret, &Buf->Header.FrameId, sizeof(Buf->Header.FrameId));
+ return Ret;
+}
 
 static my_srv *
 MySrvAlloc()
@@ -333,7 +370,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
       for (my_stream *MyStreamNode = MyConNode->FirstOut; MyStreamNode; MyStreamNode = MyStreamNode->Next)
       {
        // cancel old streams
-       if (MyStreamNode->FrameHeader.Header.FrameId < (Max(FrameHeaderBuf->Header.FrameId, 6) - 6))
+       if (FrameHeaderGetFrameId(&MyStreamNode->FrameHeader) < (Max(FrameHeaderGetFrameId(FrameHeaderBuf), 6) - 6))
        {
         StreamSendShutdown(MsQuic, MyStreamNode->Stream.QStream, H3ErrNoError);
        }
