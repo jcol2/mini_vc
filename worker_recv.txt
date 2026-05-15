@@ -3369,7 +3369,6 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
 
   // worker_recv.ts
   var metadataFlagIsKey = 1;
-  var wt;
   var decoder;
   var canvas;
   var ctx;
@@ -3386,25 +3385,8 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
   var jitterBufPlayIdx = 0;
   var jitterBufPlayIdxInit = 0;
   var jitterBufGotFirstFrame = 0;
-  async function WebTransportAlloc() {
-    const hashBytes = Uint8Array.fromHex("8142935cf816ade736327aab0b8de1f7c00292a8abac2c1dd9c450bd3a92c8cf");
-    const ret = new WebTransport(
-      "https://127.0.0.1:4567/",
-      {
-        allowPooling: false,
-        serverCertificateHashes: [
-          {
-            algorithm: "sha-256",
-            value: hashBytes.buffer
-          }
-        ]
-      }
-    );
-    await ret.ready;
-    return ret;
-  }
-  async function UnidiCb(receiveStream) {
-    const reader = receiveStream.getReader();
+  async function PortCb(msg) {
+    const reader = msg.data.reader.getReader();
     const packetBuf = [];
     let catBufLn = 0;
     for (; ; ) {
@@ -3511,6 +3493,8 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
   async function WorkerMsgCb(msg) {
     canvas = msg.data.canvas;
     ctx = canvas.getContext("webgpu");
+    const port = msg.data.port;
+    port.onmessage = PortCb;
     const adapter = await navigator.gpu?.requestAdapter();
     device = await adapter?.requestDevice();
     if (!device) {
@@ -3625,8 +3609,6 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
       pass.end();
       device.queue.submit([encoder.finish()]);
     }
-    wt = await WebTransportAlloc();
-    let reader = wt.incomingUnidirectionalStreams.getReader();
     decoder = new VideoDecoder({ output: DecoderCb, error: DecoderErrCb });
     decoder.configure({
       codec: "vp8",
@@ -3636,24 +3618,6 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
       // codedHeight: 720,
       // codedWidth: 1280,
     });
-    for (; ; ) {
-      const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 5e3));
-      const res = await Promise.race([reader.read(), timeout]);
-      if (res.skip) {
-        console.log("[recv] timeout - skipping");
-        await reader.cancel();
-        reader.releaseLock();
-        wt.close();
-        wt = await WebTransportAlloc();
-        reader = wt.incomingUnidirectionalStreams.getReader();
-        continue;
-      }
-      if (res.done) {
-        break;
-      }
-      await UnidiCb(res.value);
-    }
-    console.log("[recv] exited");
   }
   function WorkerErrCb(err) {
     console.error(err);

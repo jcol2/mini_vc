@@ -1,9 +1,24 @@
 import { frameHeaderLn, FrameHeaderRead, headerFrame, jitter_buf_el, mat4 } from "./util";
 
-declare const CertFingerprint: string;
+interface port_msg
+{
+ data:
+ {
+  reader: ReadableStream;
+ };
+};
+
+interface worker_msg
+{
+ data:
+ {
+  canvas: OffscreenCanvas;
+  port: MessagePort;
+ };
+};
+
 const metadataFlagIsKey = 0x1;
 
-let wt: WebTransport;
 let decoder: VideoDecoder;
 
 let canvas: OffscreenCanvas;
@@ -23,31 +38,11 @@ let jitterBufPlayIdx = 0;
 let jitterBufPlayIdxInit = 0;
 let jitterBufGotFirstFrame = 0;
 
-async function 
-WebTransportAlloc(): Promise<WebTransport>
-{
- const hashBytes: Uint8Array = Uint8Array.fromHex(CertFingerprint);
- const ret = new WebTransport(
-  "https://127.0.0.1:4567/",
-  {
-   allowPooling: false,
-   serverCertificateHashes: [
-    {
-     algorithm: "sha-256",
-     value: hashBytes.buffer as BufferSource,
-    },
-   ],
-  }
- );
- await ret.ready;
- return ret;
-}
-
 async function
-UnidiCb(receiveStream: any)
+PortCb(msg: port_msg)
 {
  // receive stream chunks
- const reader = receiveStream.getReader();
+ const reader = msg.data.reader.getReader();
  const packetBuf = [];
  let catBufLn = 0;
  for (;;)
@@ -90,8 +85,8 @@ UnidiCb(receiveStream: any)
   const jitterBufEl = jitterBuf[jitterBufWriteIdx];
   
   jitterBufEl.frame = new EncodedVideoChunk({
-   data: new DataView(catBuf.buffer, frameHeaderLn), 
-   timestamp: jitterBufEl.timestamp, 
+   data: new DataView(catBuf.buffer, frameHeaderLn),
+   timestamp: jitterBufEl.timestamp,
    type: jitterBufEl.metadata & metadataFlagIsKey ? "key" : "delta",
    // todo specify duration
   });
@@ -196,10 +191,12 @@ DecoderErrCb(err: Error)
 }
 
 async function
-WorkerMsgCb(msg: { data: { canvas: OffscreenCanvas }})
+WorkerMsgCb(msg: worker_msg)
 {
  canvas = msg.data.canvas;
  ctx = canvas.getContext("webgpu") as GPUCanvasContext;
+ const port = msg.data.port;
+ port.onmessage = PortCb;
 
 
  // webgpu init
@@ -327,10 +324,6 @@ WorkerMsgCb(msg: { data: { canvas: OffscreenCanvas }})
 
 
 
- // wt init
- wt = await WebTransportAlloc();
- let reader = wt.incomingUnidirectionalStreams.getReader();
-
  // init decoder
  decoder = new VideoDecoder({output: DecoderCb, error: DecoderErrCb});
  decoder.configure({
@@ -341,35 +334,18 @@ WorkerMsgCb(msg: { data: { canvas: OffscreenCanvas }})
   // codedHeight: 720,
   // codedWidth: 1280,
  });
-
- for (;;)
- {
-  // console.log("[recv] wait");
-  const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 5000));
-  const res = await Promise.race([reader.read(), timeout]) as any;
-  if (res.skip)
-  {
-   console.log('[recv] timeout - skipping');
-   await reader.cancel();
-   reader.releaseLock();
-   wt.close();
-   wt = await WebTransportAlloc();
-   reader = wt.incomingUnidirectionalStreams.getReader();
-   continue;
-  }
-  if (res.done)
-  {
-   break;
-  }
-  await UnidiCb(res.value);
- }
- console.log("[recv] exited");
 }
 
 function
 WorkerErrCb(err: any)
 {
  console.error(err);
+}
+
+async function
+Main()
+{
+ 
 }
 
 onmessage = WorkerMsgCb;
