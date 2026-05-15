@@ -1,27 +1,12 @@
-import { frameHeaderLn, FrameHeaderWrite, sendOrderAudio, sendOrderDefault, sendOrderKeyframe } from "./util";
-
-declare const CertFingerprint: string;
-let wt: WebTransport;
-let dgramWriter: WritableStreamDefaultWriter<any>;
+let encoder: VideoEncoder;
 let run = 1;
-let frameId = 0;
+let port: MessagePort;
 
-async function EncoderCb(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): Promise<void>
+async function
+EncoderCb(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): Promise<void>
 {
- const isKey = chunk.type == "key" ? 1 : 0;
- const buf = new Uint8Array(frameHeaderLn + chunk.byteLength);
- chunk.copyTo(buf.subarray(frameHeaderLn));
- const view = new DataView(buf.buffer);
- FrameHeaderWrite(view, frameId, chunk.timestamp, 0, isKey); //todo proper trackid
-// console.log("[vcap] Sending length: ", buf.length);
 
- const writeStream: WritableStream<any> = await wt.createUnidirectionalStream({sendOrder: isKey ? sendOrderKeyframe : sendOrderDefault});
- const writer = writeStream.getWriter();
- writer.write(buf);
- writer.releaseLock();
- writeStream.close();
-
- frameId++;
+ port.postMessage({chunk});
 
  // todo old dgram code
  // const dgramLn = wt.datagrams.maxDatagramSize;
@@ -40,26 +25,45 @@ async function EncoderCb(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkM
  // }
 }
 
-async function
-WorkerMsgCb(Msg: { data: { readable: ReadableStreamDefaultReader<VideoFrame | AudioData> }})
+interface worker_msg
 {
- const reader = Msg.data.readable.getReader();
- const hashBytes: Uint8Array = Uint8Array.fromHex(CertFingerprint);
- wt = new WebTransport(
-  "https://127.0.0.1:4567/",
+ data:
+ {
+  readable: ReadableStreamDefaultReader<VideoFrame | AudioData>;
+  port: MessagePort;
+ };
+};
+
+async function
+WorkerMsgCb(msg: worker_msg)
+{
+ port = msg.data.port;
+ const reader = msg.data.readable.getReader();
+ let frameCounter = 0;
+ while (run)
+ {
+  const { done, value } = await reader.read();
+  if (done) return;
+  if (encoder.encodeQueueSize < 3)
   {
-   allowPooling: false,
-   serverCertificateHashes: [
-    {
-     algorithm: "sha-256",
-     value: hashBytes.buffer as BufferSource,
-    },
-   ],
+   const keyFrame = frameCounter % 60 == 0;
+   encoder.encode(value, {keyFrame});
+   frameCounter++;
   }
- );
- await wt.ready;
- wt.closed.finally(() => {run = 0});
- dgramWriter = wt.datagrams.writable.getWriter();
+  value.close();
+ }
+ console.log("[vcap] exited");
+}
+
+function
+WorkerErrCb(err: any)
+{
+ console.error(err);
+}
+
+async function
+Main()
+{
 
  // todo request to publish stream
  // {
@@ -82,7 +86,7 @@ WorkerMsgCb(Msg: { data: { readable: ReadableStreamDefaultReader<VideoFrame | Au
 
 
  // configure encoder
- const encoder = new VideoEncoder({
+ encoder = new VideoEncoder({
   output: EncoderCb,
   error: console.log,
  });
@@ -122,33 +126,10 @@ WorkerMsgCb(Msg: { data: { readable: ReadableStreamDefaultReader<VideoFrame | Au
    break;
   }
  }
-
-
-
- let frameCounter = 0;
- while (run)
- {
-  const { done, value } = await reader.read();
-  if (done) return;
-  if (encoder.encodeQueueSize < 3)
-  {
-   const keyFrame = frameCounter % 150 == 0;
-   encoder.encode(value, {keyFrame});
-   frameCounter++;
-  }
-  value.close();
- }
- console.log("[vcap]", wt.closed);
- console.log("[vcap] exited");
-}
-
-function
-WorkerErrCb(err: any)
-{
- console.error(err);
 }
 
 onmessage = WorkerMsgCb;
 onerror = WorkerErrCb;
+Main();
 
 export {};
