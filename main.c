@@ -240,7 +240,7 @@ MyStreamPush(my_con *MyCon, uint32_t IsInStream)
 }
 
 static void
-MyStreamFree(QUIC_API_TABLE *MsQuic, my_stream *MyStream)
+MyStreamFree(QUIC_API_TABLE *MsQuic, my_stream *MyStream, uint32_t CloseQStream)
 {
  my_con *MyCon = MyStream->MyCon;
  WtLogDebug("[STRM][%p][%zd] Freeing stream\n", MyStream->Stream.QStream, MyStream->Stream.Id);
@@ -252,7 +252,7 @@ MyStreamFree(QUIC_API_TABLE *MsQuic, my_stream *MyStream)
    FrameChunkFree(MyCon, MyStream->FirstChunk);
   }
  }
- StreamFree(MsQuic, &MyStream->Stream);
+ StreamFree(MsQuic, &MyStream->Stream, CloseQStream);
 
  OsRwMutexTake(MyCon->RwMtx, 1);
 
@@ -362,7 +362,8 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
     for (my_con *MyConNode = MyStream->MyCon->MySrv->First; MyConNode; MyConNode = MyConNode->Next)
     {
      my_stream *OutStream = 0;
-     if (MyConNode != MyStream->MyCon && MyConNode->Con.SessionStream && MyConNode->Con.SessionStream->Id != UINT64_MAX)
+     // todo Change this back once pub sub impl
+     if ((MyConNode != MyStream->MyCon || 1) && MyConNode->Con.SessionStream && MyConNode->Con.SessionStream->Id != UINT64_MAX)
      {
       OsRwMutexTake(MyConNode->RwMtx, 1);
       // find stream with owning stream id
@@ -372,7 +373,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        // cancel old streams
        if (FrameHeaderGetFrameId(&MyStreamNode->FrameHeader) < (Max(FrameHeaderGetFrameId(FrameHeaderBuf), 6) - 6))
        {
-        StreamSendShutdown(MsQuic, MyStreamNode->Stream.QStream, H3ErrNoError);
+        StreamSendShutdown(MsQuic, &MyStreamNode->Stream, H3ErrNoError);
        }
        else if (FrameHeaderIsReady(&MyStreamNode->FrameHeader) && MyStreamNode->OwningStreamId == MyStream->Stream.Id)
        {
@@ -390,7 +391,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
       size_t StreamCancelCnt = Max(OutStreamLn, 6) - 6;
       for (my_stream *MyStreamNode = MyConNode->LastOut; MyStreamNode && StreamCancelCnt; MyStreamNode = MyStreamNode->Prev)
       {
-       StreamSendShutdown(MsQuic, MyStreamNode->Stream.QStream, H3ErrNoError);
+       StreamSendShutdown(MsQuic, &MyStreamNode->Stream, H3ErrNoError);
        StreamCancelCnt--;
       }
       OsRwMutexDrop(MyConNode->RwMtx, 1);
@@ -482,7 +483,8 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  else if (Event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE)
  {
   WtLogDebug("[STRM][%p][%zd][%d] Unidi peer stream shutdown, remotely: %d, by app: %d\n", QStream, MyStream->Stream.Id, GetCurrentThreadId(), Event->SHUTDOWN_COMPLETE.ConnectionClosedRemotely, Event->SHUTDOWN_COMPLETE.ConnectionShutdownByApp);
-  MyStreamFree(MsQuic, MyStream);
+  uint32_t CloseQStream = !Event->SHUTDOWN_COMPLETE.AppCloseInProgress && !Event->SHUTDOWN_COMPLETE.ConnectionShutdown;
+  MyStreamFree(MsQuic, MyStream, CloseQStream);
  }
  else if (Event->Type == QUIC_STREAM_EVENT_SEND_COMPLETE)
  {
@@ -530,7 +532,8 @@ MyBidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
  if (Event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE)
  {
   WtLogDebug("[STRM][%p][%zd][%d] Bidi peer stream shutdown, remotely: %d, by app: %d\n", QStream, MyStream->Stream.Id, GetCurrentThreadId(), Event->SHUTDOWN_COMPLETE.ConnectionClosedRemotely, Event->SHUTDOWN_COMPLETE.ConnectionShutdownByApp);
-  MyStreamFree(MsQuic, MyStream);
+  uint32_t CloseQStream = !Event->SHUTDOWN_COMPLETE.AppCloseInProgress && !Event->SHUTDOWN_COMPLETE.ConnectionShutdown;
+  MyStreamFree(MsQuic, MyStream, CloseQStream);
  }
  return QUIC_STATUS_SUCCESS;
 }

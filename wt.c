@@ -281,7 +281,7 @@ struct wt_stream
  lsxpack_header CurDecodeHeader;
  char DecodeBuffer[4096];
 
- // todo track if stream closed?
+ uint32_t Cancelled;
 
  wt_con *Con;
  wt_stream *Next;
@@ -720,10 +720,14 @@ H3HeaderEncode(lsqpack_enc *Enc, uint64_t StreamId, h3_header *Headers, size_t H
 // }
 
 static void
-StreamSendShutdown(QUIC_API_TABLE *MsQuic, HQUIC Stream, int32_t StatusCode)
+StreamSendShutdown(QUIC_API_TABLE *MsQuic, wt_stream *Stream, int32_t StatusCode)
 {
- WtLog(WtLogLvlDebug, "[STRM][%p] STREAM SHUTDOWN CALLED\n", Stream);
- MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE | QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND | QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE, StatusCode);
+ if (!Stream->Cancelled)
+ {
+  WtLog(WtLogLvlDebug, "[STRM][%p] STREAM SHUTDOWN CALLED\n", Stream->QStream);
+  MsQuic->StreamShutdown(Stream->QStream, QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE | QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND | QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE, StatusCode);
+  Stream->Cancelled = 1;
+ }
 }
 
 static void
@@ -1023,10 +1027,10 @@ StreamPush(size_t Id, wt_con *Con, wt_stream *Stream)
 }
 
 static void
-StreamFree(QUIC_API_TABLE *MsQuic, wt_stream *Stream)
+StreamFree(QUIC_API_TABLE *MsQuic, wt_stream *Stream, uint32_t CloseStream)
 {
  OsRwMutexTake(Stream->Con->RwMtx, 1);
- if (Stream->QStream)
+ if (Stream->QStream && CloseStream)
  {
   MsQuic->StreamClose(Stream->QStream);
  }
@@ -1402,7 +1406,7 @@ WtBidiH3Recv(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        if (!Stream->Con->PeerSettings.Recvd || Stream->Con->SessionStream)
        {
         WtLogDebug("Bad connnect req\n");
-        StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
+        StreamSendShutdown(MsQuic, Stream, H3ErrGeneralProtocolError);
         goto Done;
        }
        else
@@ -1419,7 +1423,7 @@ WtBidiH3Recv(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 
         if (QUIC_FAILED(MsQuic->StreamSend(QStream, Stream->Con->ResHeaderFrame.Buffers, ArrLen(Stream->Con->ResHeaderFrame.Buffers), QUIC_SEND_FLAG_NONE, 0)))
         {
-         StreamSendShutdown(MsQuic, QStream, H3ErrInternalError);
+         StreamSendShutdown(MsQuic, Stream, H3ErrInternalError);
          goto Done;
         }
         WtLogDebug("Sent connect response\n");
@@ -1428,7 +1432,7 @@ WtBidiH3Recv(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
       else
       {
        WtLogDebug("Bad connnect req\n");
-       StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
+       StreamSendShutdown(MsQuic, Stream, H3ErrGeneralProtocolError);
        goto Done;
       }
      }
@@ -1469,6 +1473,7 @@ static QUIC_STATUS
 WtBidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
 {
  wt_stream *Stream = (wt_stream *)Ctx;
+ Stream->QStream = QStream;
  QUIC_API_TABLE *MsQuic = Stream->Con->Srv->MsQuic;
  switch (Event->Type)
  {
@@ -1520,7 +1525,7 @@ WtBidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
    }
    else
    {
-    StreamSendShutdown(MsQuic, QStream, H3ErrGeneralProtocolError);
+    StreamSendShutdown(MsQuic, Stream, H3ErrGeneralProtocolError);
     return QUIC_STATUS_SUCCESS;
    }
   } break;
@@ -1574,7 +1579,7 @@ WtConCb(HQUIC QCon, void *Ctx, QUIC_CONNECTION_EVENT *Event, void *UnidiCb, void
   }
   else
   {
-   StreamFree(MsQuic, Stream);
+   StreamFree(MsQuic, Stream, 1);
    ConnectionShutdown(MsQuic, QCon, H3ErrInternalError);
   }
   break;
