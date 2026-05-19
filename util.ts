@@ -14,13 +14,17 @@ export interface jitter_buf_el
  timestamp: number,
  metadata: number,
 };
+export const metadataFlagIsKey = 0x1;
 
-export const frameHeaderLn = 11;
+export const framesPerGop = 60;
+
+export const gopHeaderLn = 11;
+export const frameHeaderLn = 4;
 
 export function
-FrameHeaderRead(view: DataView, jitterBuf: Array<jitter_buf_el>, jitterBufMask: number): number
+GopHeaderRead(view: DataView, jitterBuf: Array<jitter_buf_el>, jitterBufMask: number, Idx: number): number
 {
- const frameId = view.getUint32(1, true);
+ const frameId = (view.getUint32(1, true) * framesPerGop) + Idx;
  const timestampUs = view.getUint32(5, true);
  const trackId = view.getUint8(9); // todo handle multiple tracks?
  const metadata = view.getUint8(10);
@@ -33,7 +37,7 @@ FrameHeaderRead(view: DataView, jitterBuf: Array<jitter_buf_el>, jitterBufMask: 
 }
 
 export function
-FrameHeaderWrite(v: DataView, frameId: number, timestampUs: number, trackId: number, metadata: number): void
+GopHeaderWrite(v: DataView, frameId: number, timestampUs: number, trackId: number, metadata: number): void
 {
  v.setUint8(0, headerFrame);
  v.setUint32(1, frameId, true);
@@ -48,6 +52,28 @@ PubHeaderWrite(v: DataView): void
 {
  v.setUint8(0, headerPub);
 }
+
+export async function 
+WebTransportAlloc(fingerprint: string): Promise<WebTransport>
+{
+ const hashBytes: Uint8Array = Uint8Array.fromHex(fingerprint);
+ const ret = new WebTransport(
+  "https://127.0.0.1:4567/",
+  {
+   allowPooling: false,
+   serverCertificateHashes:
+   [
+    {
+     algorithm: "sha-256",
+     value: hashBytes.buffer as BufferSource,
+    },
+   ],
+  }
+ );
+ await ret.ready;
+ return ret;
+}
+
 
 
 

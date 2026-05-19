@@ -2,9 +2,12 @@
 (() => {
   // util.ts
   var headerFrame = 0;
-  var frameHeaderLn = 11;
-  function FrameHeaderRead(view, jitterBuf2, jitterBufMask2) {
-    const frameId = view.getUint32(1, true);
+  var metadataFlagIsKey = 1;
+  var framesPerGop = 60;
+  var gopHeaderLn = 11;
+  var frameHeaderLn = 4;
+  function GopHeaderRead(view, jitterBuf2, jitterBufMask2, Idx) {
+    const frameId = view.getUint32(1, true) * framesPerGop + Idx;
     const timestampUs = view.getUint32(5, true);
     const trackId = view.getUint8(9);
     const metadata = view.getUint8(10);
@@ -14,6 +17,23 @@
     jitterBufEl.timestamp = timestampUs;
     jitterBufEl.metadata = metadata;
     return jitterBufWriteIdx;
+  }
+  async function WebTransportAlloc(fingerprint) {
+    const hashBytes = Uint8Array.fromHex(fingerprint);
+    const ret = new WebTransport(
+      "https://127.0.0.1:4567/",
+      {
+        allowPooling: false,
+        serverCertificateHashes: [
+          {
+            algorithm: "sha-256",
+            value: hashBytes.buffer
+          }
+        ]
+      }
+    );
+    await ret.ready;
+    return ret;
   }
   var AUDIO_WORKLET_CODE = `
 class AudioCaptureProcessor extends AudioWorkletProcessor {
@@ -3368,7 +3388,7 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
   } = wgpuMatrixAPI(ZeroArray, Array, Array, Array, Array, Array);
 
   // worker_recv.ts
-  var metadataFlagIsKey = 1;
+  var wt;
   var decoder;
   var canvas;
   var ctx;
@@ -3385,63 +3405,90 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
   var jitterBufPlayIdx = 0;
   var jitterBufPlayIdxInit = 0;
   var jitterBufGotFirstFrame = 0;
-  async function PortCb(msg) {
-    const reader = msg.data.reader.getReader();
-    const packetBuf = [];
-    let catBufLn = 0;
-    for (; ; ) {
-      const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 1e3));
-      const res = await Promise.race([reader.read(), timeout]);
-      if (res.skip) {
-        console.log("[recv] inner skip");
-        await reader.cancel();
-        reader.releaseLock();
-        return;
+  function raceTimeout(prom) {
+    const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: true }), 1e3));
+    return Promise.race([prom, timeout]);
+  }
+  var emptyArr = new Uint8Array();
+  async function UnidiCb(stream) {
+    const reader = stream.getReader({ mode: "byob" });
+    let done = false;
+    while (!done) {
+      console.log("recv hey der");
+      let strmGopHeader = emptyArr;
+      let skip = false;
+      {
+        const tmpBuf = new Uint8Array(gopHeaderLn);
+        const res = await raceTimeout(reader.read(tmpBuf, { min: tmpBuf.length }));
+        skip = !!res.skip;
+        done = !!res.done;
+        strmGopHeader = res.value ?? emptyArr;
       }
-      if (res.done) {
-        break;
-      }
-      packetBuf.push(res.value);
-      catBufLn += res.value.length;
-    }
-    let catBuf = new Uint8Array(catBufLn);
-    let catBufOff = 0;
-    for (let I = 0; I < packetBuf.length; ++I) {
-      const buf = packetBuf[I];
-      catBuf.set(buf, catBufOff);
-      catBufOff += buf.length;
-    }
-    const catView = new DataView(catBuf.buffer);
-    const headerType = catView.getUint8(0);
-    if (headerType === headerFrame) {
-      const jitterBufWriteIdx = FrameHeaderRead(catView, jitterBuf, jitterBufMask);
-      const jitterBufEl = jitterBuf[jitterBufWriteIdx];
-      jitterBufEl.frame = new EncodedVideoChunk({
-        data: new DataView(catBuf.buffer, frameHeaderLn),
-        timestamp: jitterBufEl.timestamp,
-        type: jitterBufEl.metadata & metadataFlagIsKey ? "key" : "delta"
-        // todo specify duration
-      });
-      if (!jitterBufPlayIdxInit) {
-        jitterBufPlayIdxInit = 1;
-        jitterBufPlayIdx = jitterBufWriteIdx;
-      }
-      const delta = jitterBufWriteIdx >= jitterBufPlayIdx ? jitterBufWriteIdx - jitterBufPlayIdx : jitterBufLn - jitterBufPlayIdx + jitterBufWriteIdx;
-      if (delta > 6) {
-        const decodeChunk = jitterBuf[jitterBufPlayIdx];
-        if (decodeChunk.frame) {
-          if (jitterBufGotFirstFrame || decodeChunk.metadata & metadataFlagIsKey) {
-            jitterBufGotFirstFrame = 1;
-            decoder.decode(decodeChunk.frame);
+      for (let I = 0; !(done || skip) && I < framesPerGop; ++I) {
+        let strmFrameHeader = emptyArr;
+        {
+          const tmpBuf = new Uint8Array(frameHeaderLn);
+          const res = await raceTimeout(reader.read(tmpBuf, { min: tmpBuf.length }));
+          skip = !!res.skip;
+          done = !!res.done;
+          strmFrameHeader = res.value ?? emptyArr;
+        }
+        let strmFrame = emptyArr;
+        let frameLn = 0;
+        if (!(done || skip)) {
+          const strmFrameHeaderView = new DataView(strmFrameHeader.buffer);
+          frameLn = strmFrameHeaderView.getUint32(0, true);
+          console.log("recv got frame ln: ", frameLn);
+          if (frameLn > 1e7) {
+            done = true;
+            break;
           }
-          decodeChunk.frame = null;
-          jitterBufPlayIdx++;
-          jitterBufPlayIdx %= jitterBufMask;
-        } else {
-          console.error("[recv] Error no video chunk at play idx");
+          const tmpBuf = new Uint8Array(frameLn);
+          const res = await raceTimeout(reader.read(tmpBuf, { min: tmpBuf.length }));
+          skip = !!res.skip;
+          done = !!res.done;
+          strmFrame = res.value ?? emptyArr;
+        }
+        if (!skip && strmFrame.length === frameLn && strmGopHeader.length === gopHeaderLn) {
+          const strmGopHeaderView = new DataView(strmGopHeader.buffer);
+          const strmType = strmGopHeaderView.getUint8(0);
+          if (strmType === headerFrame) {
+            const jitterBufWriteIdx = GopHeaderRead(strmGopHeaderView, jitterBuf, jitterBufMask, I);
+            const jitterBufEl = jitterBuf[jitterBufWriteIdx];
+            console.log("recv frameid", jitterBufEl.frameId);
+            jitterBufEl.frame = new EncodedVideoChunk({
+              data: new DataView(strmFrame.buffer),
+              timestamp: jitterBufEl.timestamp,
+              // type: jitterBufEl.metadata & metadataFlagIsKey ? "key" : "delta",
+              type: I == 0 ? "key" : "delta"
+              // todo specify duration
+            });
+            if (!jitterBufPlayIdxInit) {
+              jitterBufPlayIdxInit = 1;
+              jitterBufPlayIdx = jitterBufWriteIdx;
+            }
+            const delta = jitterBufWriteIdx >= jitterBufPlayIdx ? jitterBufWriteIdx - jitterBufPlayIdx : jitterBufLn - jitterBufPlayIdx + jitterBufWriteIdx;
+            if (delta > 6) {
+              const decodeChunk = jitterBuf[jitterBufPlayIdx];
+              if (decodeChunk.frame) {
+                if (jitterBufGotFirstFrame || decodeChunk.metadata & metadataFlagIsKey) {
+                  jitterBufGotFirstFrame = 1;
+                  decoder.decode(decodeChunk.frame);
+                }
+                decodeChunk.frame = null;
+                jitterBufPlayIdx++;
+                jitterBufPlayIdx %= jitterBufMask;
+              } else {
+                console.error("[recv] Error no video chunk at play idx", jitterBufPlayIdx, jitterBufWriteIdx);
+              }
+            }
+          }
         }
       }
     }
+    console.log("recv exiting unidi");
+    await reader.cancel();
+    reader.releaseLock();
   }
   function DecoderCb(videoFrame) {
     const width = videoFrame.displayWidth;
@@ -3493,8 +3540,6 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
   async function WorkerMsgCb(msg) {
     canvas = msg.data.canvas;
     ctx = canvas.getContext("webgpu");
-    const port = msg.data.port;
-    port.onmessage = PortCb;
     const adapter = await navigator.gpu?.requestAdapter();
     device = await adapter?.requestDevice();
     if (!device) {
@@ -3618,6 +3663,29 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
       // codedHeight: 720,
       // codedWidth: 1280,
     });
+    console.log("hi");
+    wt = await WebTransportAlloc("8142935cf816ade736327aab0b8de1f7c00292a8abac2c1dd9c450bd3a92c8cf");
+    let unidiStrmReader = wt.incomingUnidirectionalStreams.getReader();
+    for (; ; ) {
+      console.log("[recv] wait");
+      const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 5e3));
+      const res = await Promise.race([unidiStrmReader.read(), timeout]);
+      if (res.skip) {
+        console.log("[recv] timeout - skipping");
+        await unidiStrmReader.cancel();
+        unidiStrmReader.releaseLock();
+        wt.close();
+        wt = await WebTransportAlloc("8142935cf816ade736327aab0b8de1f7c00292a8abac2c1dd9c450bd3a92c8cf");
+        unidiStrmReader = wt.incomingUnidirectionalStreams.getReader();
+        continue;
+      }
+      if (res.done) {
+        break;
+      }
+      const stream = res.value;
+      UnidiCb(stream);
+    }
+    console.log("[recv] loop exit");
   }
   function WorkerErrCb(err) {
     console.error(err);

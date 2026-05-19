@@ -1,23 +1,12 @@
-import { frameHeaderLn, FrameHeaderRead, headerFrame, jitter_buf_el, mat4 } from "./util";
+import { frameHeaderLn, framesPerGop, gopHeaderLn, GopHeaderRead, headerFrame, jitter_buf_el, mat4, metadataFlagIsKey, WebTransportAlloc } from "./util";
 
-interface port_msg
+export interface recv_worker_msg
 {
- data:
- {
-  reader: ReadableStream;
- };
+ canvas: OffscreenCanvas;
 };
 
-interface worker_msg
-{
- data:
- {
-  canvas: OffscreenCanvas;
-  port: MessagePort;
- };
-};
-
-const metadataFlagIsKey = 0x1;
+declare const certFingerprint: string;
+let wt: WebTransport;
 
 let decoder: VideoDecoder;
 
@@ -38,87 +27,120 @@ let jitterBufPlayIdx = 0;
 let jitterBufPlayIdxInit = 0;
 let jitterBufGotFirstFrame = 0;
 
+function
+raceTimeout<T>(prom: Promise<T>): Promise<{skip: boolean} | T>
+{
+ const timeout: Promise<{skip: boolean}> = new Promise((resolve, _) => setTimeout(() => resolve({ skip: true }), 1000));
+ return Promise.race([prom, timeout]);
+}
+
+const emptyArr = new Uint8Array();
 async function
-PortCb(msg: port_msg)
+UnidiCb(stream: ReadableStream)
 {
  // receive stream chunks
- const reader = msg.data.reader.getReader();
- const packetBuf = [];
- let catBufLn = 0;
- for (;;)
- {
-  // console.log("[recv] strm wait");
-  const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 1000));
-  const res = await Promise.race([reader.read(), timeout]) as any;
-  if (res.skip)
-  {
-   console.log("[recv] inner skip");
-   await reader.cancel();
-   reader.releaseLock();
-   return;
-  }
-  if (res.done)
-  {
-   break;
-  }
-  packetBuf.push(res.value);
-  catBufLn += res.value.length;
- }
- // console.log("[recv] my buf ln", catBufLn);
+ const reader = stream.getReader({mode: "byob"});
 
- // cat stream chunks
- let catBuf = new Uint8Array(catBufLn);
- let catBufOff = 0;
- for (let I = 0; I < packetBuf.length; ++I)
+ // todo signal exit condition
+ let done = false;
+ while (!done)
  {
-  const buf = packetBuf[I];
-  catBuf.set(buf, catBufOff);
-  catBufOff += buf.length;
- }
-
- // insert into jitter buf
- const catView = new DataView(catBuf.buffer);
- const headerType = catView.getUint8(0);
- if (headerType === headerFrame)
- {
-  const jitterBufWriteIdx = FrameHeaderRead(catView, jitterBuf, jitterBufMask);
-  const jitterBufEl = jitterBuf[jitterBufWriteIdx];
-  
-  jitterBufEl.frame = new EncodedVideoChunk({
-   data: new DataView(catBuf.buffer, frameHeaderLn),
-   timestamp: jitterBufEl.timestamp,
-   type: jitterBufEl.metadata & metadataFlagIsKey ? "key" : "delta",
-   // todo specify duration
-  });
-  
-  if (!jitterBufPlayIdxInit)
+  console.log("[recv] Begin recv GOP");
+  let strmGopHeader = emptyArr;
+  let skip = false;
   {
-   jitterBufPlayIdxInit = 1;
-   jitterBufPlayIdx = jitterBufWriteIdx;
+   const tmpBuf = new Uint8Array(gopHeaderLn);
+   const res = await raceTimeout(reader.read(tmpBuf, {min: tmpBuf.length})) as any;
+   skip = !!res.skip;
+   done = !!res.done;
+   strmGopHeader = res.value ?? emptyArr;
   }
-  const delta = jitterBufWriteIdx >= jitterBufPlayIdx ? jitterBufWriteIdx - jitterBufPlayIdx : jitterBufLn - jitterBufPlayIdx + jitterBufWriteIdx;
-  if (delta > 6)
+
+  for (let I = 0; !(done || skip) && I < framesPerGop; ++I)
   {
-   const decodeChunk = jitterBuf[jitterBufPlayIdx];
-   if (decodeChunk.frame)
+   let strmFrameHeader = emptyArr;
    {
-    // first frame decoded must be a keyframe
-    if (jitterBufGotFirstFrame || (decodeChunk.metadata & metadataFlagIsKey))
+    const tmpBuf = new Uint8Array(frameHeaderLn);
+    const res = await raceTimeout(reader.read(tmpBuf, {min: tmpBuf.length})) as any;
+    skip = !!res.skip;
+    done = !!res.done;
+    strmFrameHeader = res.value ?? emptyArr;
+   }
+
+   let strmFrame = emptyArr;
+   let frameLn = 0;
+   if (!(done || skip))
+   {
+    const strmFrameHeaderView = new DataView(strmFrameHeader!.buffer);
+    frameLn = strmFrameHeaderView.getUint32(0, true);
+    if (frameLn > 10_000_000)
     {
-     jitterBufGotFirstFrame = 1;
-     // console.log("[recv] queuing decode");
-     decoder.decode(decodeChunk.frame);
+     console.error("[recv] Error: exceedingly long frameLn:", frameLn);
+     done = true;
+     break;
     }
-    decodeChunk.frame = null;
-    jitterBufPlayIdx++;
-    jitterBufPlayIdx %= jitterBufMask;
+
+    const tmpBuf = new Uint8Array(frameLn);
+    const res = await raceTimeout(reader.read(tmpBuf, {min: tmpBuf.length})) as any;
+    skip = !!res.skip;
+    done = !!res.done;
+    strmFrame = res.value ?? emptyArr;
    }
-   else
+
+   if (!(skip) && strmFrame.length === frameLn && strmGopHeader.length === gopHeaderLn)
    {
-    console.error("[recv] Error no video chunk at play idx");
+    const strmGopHeaderView = new DataView(strmGopHeader.buffer);
+    const strmType = strmGopHeaderView.getUint8(0);
+    if (strmType === headerFrame)
+    {
+     const jitterBufWriteIdx = GopHeaderRead(strmGopHeaderView, jitterBuf, jitterBufMask, I);
+     const jitterBufEl = jitterBuf[jitterBufWriteIdx];
+     console.log("recv frameid", jitterBufEl.frameId);
+     
+     jitterBufEl.frame = new EncodedVideoChunk({
+      data: new DataView(strmFrame.buffer),
+      // ! timestamp is incorrect
+      timestamp: jitterBufEl.timestamp,
+      // type: jitterBufEl.metadata & metadataFlagIsKey ? "key" : "delta",
+      type: I == 0 ? "key" : "delta",
+      // todo specify duration
+     });
+     
+     if (!jitterBufPlayIdxInit)
+     {
+      jitterBufPlayIdxInit = 1;
+      jitterBufPlayIdx = jitterBufWriteIdx;
+     }
+     const delta = jitterBufWriteIdx >= jitterBufPlayIdx ? jitterBufWriteIdx - jitterBufPlayIdx : jitterBufLn - jitterBufPlayIdx + jitterBufWriteIdx;
+     if (delta > 6)
+     {
+      const decodeChunk = jitterBuf[jitterBufPlayIdx];
+      if (decodeChunk.frame)
+      {
+       // first frame decoded must be a keyframe
+       if (jitterBufGotFirstFrame || (decodeChunk.metadata & metadataFlagIsKey))
+       {
+        jitterBufGotFirstFrame = 1;
+        // console.log("[recv] queuing decode");
+        decoder.decode(decodeChunk.frame);
+       }
+       decodeChunk.frame = null;
+       jitterBufPlayIdx++;
+       jitterBufPlayIdx %= jitterBufMask;
+      }
+      else
+      {
+       console.error("[recv] Error no video chunk at play idx", jitterBufPlayIdx, jitterBufWriteIdx);
+      }
+     }
+    }
    }
   }
  }
+ console.log("[recv] Exiting UnidiCb");
+ await reader.cancel();
+ reader.releaseLock();
+ // await stream.cancel();
 }
 
 function
@@ -191,12 +213,10 @@ DecoderErrCb(err: Error)
 }
 
 async function
-WorkerMsgCb(msg: worker_msg)
+WorkerMsgCb(msg: {data: recv_worker_msg})
 {
  canvas = msg.data.canvas;
  ctx = canvas.getContext("webgpu") as GPUCanvasContext;
- const port = msg.data.port;
- port.onmessage = PortCb;
 
 
  // webgpu init
@@ -334,6 +354,36 @@ WorkerMsgCb(msg: worker_msg)
   // codedHeight: 720,
   // codedWidth: 1280,
  });
+
+ wt = await WebTransportAlloc(certFingerprint);
+ let unidiStrmReader = wt.incomingUnidirectionalStreams.getReader();
+ for (;;)
+ {
+  console.log("[recv] wait");
+  const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: 1 }), 5000));
+  const res = await Promise.race([unidiStrmReader.read(), timeout]) as any;
+  if (res.skip)
+  {
+   // wtInit = 0;
+   console.log('[recv] timeout - skipping');
+   await unidiStrmReader.cancel();
+   unidiStrmReader.releaseLock();
+   wt.close();
+   wt = await WebTransportAlloc(certFingerprint);
+   unidiStrmReader = wt.incomingUnidirectionalStreams.getReader();
+   continue;
+  }
+  if (res.done)
+  {
+   break;
+  }
+
+  // on ff its a WebTransportReceiveStream
+  const stream: ReadableStream = res.value;
+  UnidiCb(stream);
+ }
+
+ console.log("[recv] loop exit");
 }
 
 function
