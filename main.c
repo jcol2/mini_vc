@@ -338,7 +338,8 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   {
 
    // buffer input
-   if (!FrameHeaderIsReady(FrameHeaderBuf))
+   uint32_t WasReady = FrameHeaderIsReady(FrameHeaderBuf);
+   if (!WasReady)
    {
     for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
     {
@@ -356,14 +357,14 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
    }
 
    // if stream has frame id, then fan out
-   if (FrameHeaderIsReady(FrameHeaderBuf))
+   uint32_t IsReady = FrameHeaderIsReady(FrameHeaderBuf);
+   if (IsReady)
    {
     OsRwMutexTake(MyStream->MyCon->MySrv->RwMtx, 0);
     for (my_con *MyConNode = MyStream->MyCon->MySrv->First; MyConNode; MyConNode = MyConNode->Next)
     {
      my_stream *OutStream = 0;
-     // todo Change this back once pub sub impl
-     if ((MyConNode != MyStream->MyCon || 1) && MyConNode->Con.SessionStream && MyConNode->Con.SessionStream->Id != UINT64_MAX)
+     if (MyConNode != MyStream->MyCon && MyConNode->Con.SessionStream && MyConNode->Con.SessionStream->Id != UINT64_MAX)
      {
       OsRwMutexTake(MyConNode->RwMtx, 1);
       // find stream with owning stream id
@@ -396,7 +397,8 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
       }
       OsRwMutexDrop(MyConNode->RwMtx, 1);
 
-      if (!OutStream)
+      // only create a new outgoing stream if we're at the beginning of the incoming stream
+      if (!OutStream && !WasReady)
       {
        // create out stream
        WtLogDebug("[STRM][%p][%zd] Creating stream\n", QStream, MyStream->Stream.Id);
@@ -424,55 +426,58 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        }
       }
 
-      // send the buffers
-      size_t BufCnt = Event->RECEIVE.BufferCount;
-      frame_chunk _Chunk;
-      WtLogDebug("[CHUNK][%p][%zd] Start queue chunks for stream: %zd, BufCnt: %zd\n", QStream, MyStream->Stream.Id, OutStream->Stream.Id, BufCnt);
-      if (HasFin)
+      if (OutStream)
       {
-       WtLogDebug("[CHUNK][%p][%zd][%d] Recv FIN for stream: %zd\n", QStream, MyStream->Stream.Id, GetCurrentThreadId(), OutStream->Stream.Id);
-      }
-      for (size_t I = 0; I < BufCnt; ++I)
-      {
-       QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
-
-       size_t Rest = Buf->Length % sizeof(_Chunk.Mem);
-       size_t IterLn = Buf->Length - Rest;
-       size_t BufOff = 0;
-       for (; BufOff < IterLn; BufOff += sizeof(_Chunk.Mem))
+       // send the buffers
+       size_t BufCnt = Event->RECEIVE.BufferCount;
+       frame_chunk _Chunk;
+       WtLogDebug("[CHUNK][%p][%zd] Start queue chunks for stream: %zd, BufCnt: %zd\n", QStream, MyStream->Stream.Id, OutStream->Stream.Id, BufCnt);
+       if (HasFin)
        {
-        QUIC_SEND_FLAGS SendFlags = QUIC_SEND_FLAG_NONE;
-        if (HasFin && I == (BufCnt - 1) && !Rest && (BufOff + sizeof(_Chunk.Mem)) == IterLn)
-        {
-         SendFlags |= QUIC_SEND_FLAG_FIN;
-         WtLogDebug("[CHUNK][%p][%zd] Assign fin flag for stream: %zd, rest: %zd iterln: %zd bufoff: %zd hasfin: %d\n", QStream, MyStream->Stream.Id, OutStream->Stream.Id, Rest, IterLn, BufOff, HasFin);
-        }
-        if (I < (BufCnt - 1) || Rest || (BufOff + sizeof(_Chunk.Mem)) < IterLn)
-        {
-         SendFlags |= QUIC_SEND_FLAG_DELAY_SEND;
-        }
-        
-        MyStreamSendChunk(MsQuic, OutStream, Buf->Buffer + BufOff, sizeof(_Chunk.Mem), SendFlags);
+        WtLogDebug("[CHUNK][%p][%zd][%d] Recv FIN for stream: %zd\n", QStream, MyStream->Stream.Id, GetCurrentThreadId(), OutStream->Stream.Id);
        }
-       if (Rest)
+       for (size_t I = 0; I < BufCnt; ++I)
        {
-        QUIC_SEND_FLAGS SendFlags = HasFin && I == (BufCnt - 1) ? QUIC_SEND_FLAG_FIN : QUIC_SEND_FLAG_NONE;
-        MyStreamSendChunk(MsQuic, OutStream, Buf->Buffer + BufOff, Rest, SendFlags);
-       }
-      }
+        QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
 
-      // forward empty buffer with FIN
-      // bufs can be modified so can't rely on Event->RECEIVE.TotalBufferLength
-      // therefore calc totalbufln
-      size_t TotalBufLn = 0;
-      for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
-      {
-       QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
-       TotalBufLn += Buf->Length;
-      }
-      if (!TotalBufLn && HasFin)
-      {
-       MyStreamSendChunk(MsQuic, OutStream, 0, 0, QUIC_SEND_FLAG_FIN);
+        size_t Rest = Buf->Length % sizeof(_Chunk.Mem);
+        size_t IterLn = Buf->Length - Rest;
+        size_t BufOff = 0;
+        for (; BufOff < IterLn; BufOff += sizeof(_Chunk.Mem))
+        {
+         QUIC_SEND_FLAGS SendFlags = QUIC_SEND_FLAG_NONE;
+         if (HasFin && I == (BufCnt - 1) && !Rest && (BufOff + sizeof(_Chunk.Mem)) == IterLn)
+         {
+          SendFlags |= QUIC_SEND_FLAG_FIN;
+          WtLogDebug("[CHUNK][%p][%zd] Assign fin flag for stream: %zd, rest: %zd iterln: %zd bufoff: %zd hasfin: %d\n", QStream, MyStream->Stream.Id, OutStream->Stream.Id, Rest, IterLn, BufOff, HasFin);
+         }
+         if (I < (BufCnt - 1) || Rest || (BufOff + sizeof(_Chunk.Mem)) < IterLn)
+         {
+          SendFlags |= QUIC_SEND_FLAG_DELAY_SEND;
+         }
+         
+         MyStreamSendChunk(MsQuic, OutStream, Buf->Buffer + BufOff, sizeof(_Chunk.Mem), SendFlags);
+        }
+        if (Rest)
+        {
+         QUIC_SEND_FLAGS SendFlags = HasFin && I == (BufCnt - 1) ? QUIC_SEND_FLAG_FIN : QUIC_SEND_FLAG_NONE;
+         MyStreamSendChunk(MsQuic, OutStream, Buf->Buffer + BufOff, Rest, SendFlags);
+        }
+       }
+
+       // forward empty buffer with FIN
+       // bufs can be modified so can't rely on Event->RECEIVE.TotalBufferLength
+       // therefore calc totalbufln
+       size_t TotalBufLn = 0;
+       for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
+       {
+        QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
+        TotalBufLn += Buf->Length;
+       }
+       if (!TotalBufLn && HasFin)
+       {
+        MyStreamSendChunk(MsQuic, OutStream, 0, 0, QUIC_SEND_FLAG_FIN);
+       }
       }
      }
     }
@@ -492,7 +497,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   if (Chunk)
   {
    FrameChunkFree(MyStream->MyCon, Chunk);
-   WtLogDebug("[CHUNK][%p][%zd][%d] Freed chunk\n", QStream, MyStream->Stream.Id, GetCurrentThreadId());
+   WtLogInfo("[CHUNK][%p][%zd][%d] Freed chunk\n", QStream, MyStream->Stream.Id, GetCurrentThreadId());
   }
   if (Event->SEND_COMPLETE.Canceled)
   {

@@ -302,7 +302,7 @@ enum
  WtLogLvlWarn = 8,
  WtLogLvlErr = 16,
 };
-#define WtCurLogLvl WtLogLvlInfo
+#define WtCurLogLvl WtLogLvlDebug
 
 static void
 WtLog(uint32_t Lvl, char *Fmt, ...)
