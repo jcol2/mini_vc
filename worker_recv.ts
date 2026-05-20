@@ -154,7 +154,6 @@ UnidiCb(stream: ReadableStream)
  console.log("[recv] Exiting UnidiCb");
  await reader.cancel();
  reader.releaseLock();
- // await stream.cancel();
 }
 
 function

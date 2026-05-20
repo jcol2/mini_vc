@@ -88,6 +88,7 @@ FrameHeaderRead(v: DataView, el: jitter_buf_el): void
  const off = {off: 0};
  el.frameLn = DataViewReadU32(v, true, off);
  el.timestamp = DataViewReadU32(v, true, off);
+ console.assert(off.off === frameHeaderLn, "Error: FrameHeaderRead incorrect read ln", off.off, frameHeaderLn);
 }
 
 export function
