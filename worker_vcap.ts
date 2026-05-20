@@ -1,4 +1,4 @@
-import { gopHeaderLn, GopHeaderWrite, sendOrderDefault, sendOrderKeyframe, frameHeaderLn, framesPerGop, WebTransportAlloc } from "./util";
+import { gopHeaderLn, GopHeaderWrite, sendOrderDefault, sendOrderKeyframe, frameHeaderLn, framesPerGop, WebTransportAlloc, FrameHeaderWrite } from "./util";
 
 export interface vcap_worker_msg
 {
@@ -9,9 +9,6 @@ declare const certFingerprint: string;
 let wt: WebTransport;
 let encoder: VideoEncoder;
 let run = 1;
-// let streams: Array<WritableStream<any>>;
-// let curStreamIdx = 0;
-// let curStreamIdxInit = 0;
 let stream: WritableStream | null = null;
 
 let frameId = 0;
@@ -31,7 +28,6 @@ EncoderCb(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): Promi
   }
   stream = await wt.createUnidirectionalStream();
   bufLn = gopHeaderLn + frameHeaderLn + chunk.byteLength;
-  // console.log("[vcap] new stream idx", curStreamIdx);
   // todo update stream priority
  }
  const buf = new Uint8Array(bufLn);
@@ -39,16 +35,13 @@ EncoderCb(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): Promi
 
  if (isKey)
  {
-  GopHeaderWrite(view, frameId, chunk.timestamp, 0, isKey); //todo proper trackid
-  writeOff += gopHeaderLn;
+  writeOff = GopHeaderWrite(view, writeOff, frameId, 0, isKey); //todo proper trackid
  }
- view.setUint32(writeOff, chunk.byteLength, true);
- writeOff += frameHeaderLn;
+ writeOff = FrameHeaderWrite(view, writeOff, chunk.byteLength, chunk.timestamp);
  chunk.copyTo(buf.subarray(writeOff));
 
 // console.log("[vcap] Sending length: ", buf.length);
 
- // const writeStream = streams[curStreamIdx];
  if (stream)
  {
   const writeStream = stream;

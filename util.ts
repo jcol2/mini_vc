@@ -10,6 +10,7 @@ export const headerSub = 2;
 export interface jitter_buf_el
 {
  frame: EncodedVideoChunk | null,
+ frameLn: number,
  frameId: number,
  timestamp: number,
  metadata: number,
@@ -18,32 +19,86 @@ export const metadataFlagIsKey = 0x1;
 
 export const framesPerGop = 60;
 
-export const gopHeaderLn = 11;
-export const frameHeaderLn = 4;
+export const gopHeaderLn = 7;
+export const frameHeaderLn = 8;
+
+function
+DataViewReadU8(v: DataView, out: { off: number }): number
+{
+ const ret: number = v.getUint8(out.off);
+ out.off += 1;
+ return ret;
+}
+
+function
+DataViewReadU32(v: DataView, le: boolean, out: { off: number }): number
+{
+ const ret: number = v.getUint32(out.off, le);
+ out.off += 4;
+ return ret;
+}
+
+function
+DataViewWriteU8(v: DataView, n: number, off: number): number
+{
+ v.setUint8(off, n);
+ return off + 1;
+}
+
+function
+DataViewWriteU32(v: DataView, n: number, off: number, le: boolean): number
+{
+ v.setUint32(off, n, le);
+ return off + 4;
+}
 
 export function
-GopHeaderRead(view: DataView, jitterBuf: Array<jitter_buf_el>, jitterBufMask: number, Idx: number): number
+GopHeaderRead(v: DataView, jitterBuf: Array<jitter_buf_el>, jitterBufMask: number): number
 {
- const frameId = (view.getUint32(1, true) * framesPerGop) + Idx;
- const timestampUs = view.getUint32(5, true);
- const trackId = view.getUint8(9); // todo handle multiple tracks?
- const metadata = view.getUint8(10);
+ const off = {off: 1};
+ const frameId = DataViewReadU32(v, true, off) * framesPerGop;
+ const trackId = DataViewReadU8(v, off); // todo track trackid
+ const metadata = DataViewReadU8(v, off);
+
  const jitterBufWriteIdx = frameId & jitterBufMask;
  const jitterBufEl = jitterBuf[jitterBufWriteIdx];
- jitterBufEl.frameId = frameId;
- jitterBufEl.timestamp = timestampUs;
+ // jitterBufEl.frameId = frameId;
  jitterBufEl.metadata = metadata;
+
+ console.assert(off.off === gopHeaderLn, "Error: GopHeaderRead incorrect read ln", off.off, gopHeaderLn);
  return jitterBufWriteIdx;
 }
 
 export function
-GopHeaderWrite(v: DataView, frameId: number, timestampUs: number, trackId: number, metadata: number): void
+GopHeaderWrite(v: DataView, off: number, frameId: number, trackId: number, metadata: number): number
 {
- v.setUint8(0, headerFrame);
- v.setUint32(1, frameId, true);
- v.setUint32(5, timestampUs, true);
- v.setUint8(9, trackId);
- v.setUint8(10, metadata);
+ let newOff = 0;
+ newOff = DataViewWriteU8(v, headerFrame, newOff);
+ newOff = DataViewWriteU32(v, frameId, newOff, true);
+ newOff = DataViewWriteU8(v, trackId, newOff);
+ newOff = DataViewWriteU8(v, metadata, newOff);
+
+ console.assert((newOff - off) === gopHeaderLn, "Error: GopHeaderWrite incorrect write ln", newOff, gopHeaderLn);
+ return newOff;
+}
+
+export function
+FrameHeaderRead(v: DataView, el: jitter_buf_el): void
+{
+ const off = {off: 0};
+ el.frameLn = DataViewReadU32(v, true, off);
+ el.timestamp = DataViewReadU32(v, true, off);
+}
+
+export function
+FrameHeaderWrite(v: DataView, off: number, frameLn: number, timestampUs: number): number
+{
+ let newOff = off;
+ newOff = DataViewWriteU32(v, frameLn, newOff, true);
+ newOff = DataViewWriteU32(v, timestampUs, newOff, true);
+
+ console.assert((newOff - off) === frameHeaderLn, "Error: FrameHeaderWrite incorrect write ln", newOff, frameHeaderLn);
+ return newOff;
 }
 
 // todo decide pub header shape

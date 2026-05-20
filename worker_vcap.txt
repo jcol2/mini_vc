@@ -3,14 +3,31 @@
   // util.ts
   var headerFrame = 0;
   var framesPerGop = 60;
-  var gopHeaderLn = 11;
-  var frameHeaderLn = 4;
-  function GopHeaderWrite(v, frameId2, timestampUs, trackId, metadata) {
-    v.setUint8(0, headerFrame);
-    v.setUint32(1, frameId2, true);
-    v.setUint32(5, timestampUs, true);
-    v.setUint8(9, trackId);
-    v.setUint8(10, metadata);
+  var gopHeaderLn = 7;
+  var frameHeaderLn = 8;
+  function DataViewWriteU8(v, n, off) {
+    v.setUint8(off, n);
+    return off + 1;
+  }
+  function DataViewWriteU32(v, n, off, le) {
+    v.setUint32(off, n, le);
+    return off + 4;
+  }
+  function GopHeaderWrite(v, off, frameId2, trackId, metadata) {
+    let newOff = 0;
+    newOff = DataViewWriteU8(v, headerFrame, newOff);
+    newOff = DataViewWriteU32(v, frameId2, newOff, true);
+    newOff = DataViewWriteU8(v, trackId, newOff);
+    newOff = DataViewWriteU8(v, metadata, newOff);
+    console.assert(newOff - off === gopHeaderLn, "Error: GopHeaderWrite incorrect write ln", newOff, gopHeaderLn);
+    return newOff;
+  }
+  function FrameHeaderWrite(v, off, frameLn, timestampUs) {
+    let newOff = off;
+    newOff = DataViewWriteU32(v, frameLn, newOff, true);
+    newOff = DataViewWriteU32(v, timestampUs, newOff, true);
+    console.assert(newOff - off === frameHeaderLn, "Error: FrameHeaderWrite incorrect write ln", newOff, frameHeaderLn);
+    return newOff;
   }
   async function WebTransportAlloc(fingerprint) {
     const hashBytes = Uint8Array.fromHex(fingerprint);
@@ -3402,11 +3419,9 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
     const buf = new Uint8Array(bufLn);
     const view = new DataView(buf.buffer);
     if (isKey) {
-      GopHeaderWrite(view, frameId, chunk.timestamp, 0, isKey);
-      writeOff += gopHeaderLn;
+      writeOff = GopHeaderWrite(view, writeOff, frameId, 0, isKey);
     }
-    view.setUint32(writeOff, chunk.byteLength, true);
-    writeOff += frameHeaderLn;
+    writeOff = FrameHeaderWrite(view, writeOff, chunk.byteLength, chunk.timestamp);
     chunk.copyTo(buf.subarray(writeOff));
     if (stream) {
       const writeStream = stream;

@@ -9,12 +9,11 @@ enum
 };
 
 #pragma pack(push, 1)
-typedef struct frame_header frame_header;
-struct frame_header
+typedef struct gop_header gop_header;
+struct gop_header
 {
  header_kind FrameType;
  uint32_t FrameId;
- uint32_t TimeStampUs;
  uint8_t TrackId;
  uint8_t Metadata;
 };
@@ -38,13 +37,13 @@ struct sub_header
 #pragma pack(pop)
 
 
-typedef struct frame_header_buf frame_header_buf;
-struct frame_header_buf
+typedef struct gop_header_buf gop_header_buf;
+struct gop_header_buf
 {
  union
  {
-  uint8_t Mem[sizeof(frame_header)];
-  frame_header Header;
+  uint8_t Mem[sizeof(gop_header)];
+  gop_header Header;
  };
  uint8_t Ln;
 };
@@ -95,7 +94,7 @@ struct my_stream
  uint32_t IsInStream;
  // outgoing streams are mapped to an incoming stream
  uint64_t OwningStreamId;
- frame_header_buf FrameHeader;
+ gop_header_buf FrameHeader;
 
  wt_stream Stream;
 
@@ -114,7 +113,7 @@ struct my_stream
 
 // Getters needed for unaligned access
 static uint32_t
-FrameHeaderGetFrameId(frame_header_buf *Buf)
+FrameHeaderGetFrameId(gop_header_buf *Buf)
 {
  uint32_t Ret = 0;
  StaticAssert(ret_geq_frame_id, sizeof(Ret) >= sizeof(Buf->Header.FrameId));
@@ -325,7 +324,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   WtLogErr("[STRM] Error: Ctx missing in MyUnidiCb!\n");
   return QUIC_STATUS_SUCCESS;
  }
- frame_header_buf *FrameHeaderBuf = &MyStream->FrameHeader;
+ gop_header_buf *FrameHeaderBuf = &MyStream->FrameHeader;
  QUIC_API_TABLE *MsQuic = MyStream->Stream.Con->Srv->MsQuic;
  WtUnidiCb(QStream, &MyStream->Stream, Event);
 
