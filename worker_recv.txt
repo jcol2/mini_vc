@@ -3420,6 +3420,9 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
   var jitterBufPlayIdx = 0;
   var jitterBufPlayIdxInit = 0;
   var jitterBufGotFirstFrame = 0;
+  var videoFrames = [];
+  var videoFramesIdx = 0;
+  var lastFramePresentMs = 0;
   function raceTimeout(prom) {
     const timeout = new Promise((resolve, _) => setTimeout(() => resolve({ skip: true }), 1e3));
     return Promise.race([prom, timeout]);
@@ -3509,19 +3512,28 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
     await reader.cancel();
     reader.releaseLock();
   }
-  var videoFrame = null;
   function DecoderCb(v) {
-    if (videoFrame) {
-      videoFrame.close();
+    while (videoFramesIdx) {
+      videoFramesIdx--;
+      videoFrames.shift()?.close();
     }
-    videoFrame = v.clone();
+    videoFrames.push(v.clone());
     v.close();
   }
   function DecoderErrCb(err) {
     console.error(err);
   }
   function Raf() {
+    let now = Date.now();
+    let elapsed = now - lastFramePresentMs;
+    let videoFrame = null;
+    if (elapsed >= 33) {
+      console.log(elapsed);
+      lastFramePresentMs = now;
+      videoFrame = videoFrames.length ? videoFrames[videoFramesIdx] : null;
+    }
     if (videoFrame) {
+      videoFramesIdx++;
       const width = videoFrame.displayWidth;
       const height = videoFrame.displayHeight;
       canvas.width = width;

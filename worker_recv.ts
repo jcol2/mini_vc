@@ -27,6 +27,11 @@ let jitterBufPlayIdx = 0;
 let jitterBufPlayIdxInit = 0;
 let jitterBufGotFirstFrame = 0;
 
+// frames ready for raf render loop
+let videoFrames: Array<VideoFrame> = [];
+let videoFramesIdx = 0;
+let lastFramePresentMs = 0;
+
 function
 raceTimeout<T>(prom: Promise<T>): Promise<{skip: boolean} | T>
 {
@@ -156,15 +161,18 @@ UnidiCb(stream: ReadableStream)
  reader.releaseLock();
 }
 
-let videoFrame: null | VideoFrame = null;
+// apparently frames need to be closed in this cb
+// I was getting a GPUDevice.importExternalTexture: Cross-origin elements require CORS! error on FF
+// when I was trying to close frames in the RAF loop
 function
 DecoderCb(v: VideoFrame)
 {
- if (videoFrame)
+ while (videoFramesIdx)
  {
-  videoFrame.close();
+  videoFramesIdx--;
+  videoFrames.shift()?.close();
  }
- videoFrame = v.clone();
+ videoFrames.push(v.clone());
  v.close();
 }
 
@@ -177,8 +185,20 @@ DecoderErrCb(err: Error)
 function
 Raf()
 {
+ let now = Date.now();
+ let elapsed = now - lastFramePresentMs;
+ let videoFrame = null;
+ // todo update this to negotiated fps later
+ if (elapsed >= 33)
+ {
+  console.log(elapsed);
+  lastFramePresentMs = now;
+  videoFrame = videoFrames.length ? videoFrames[videoFramesIdx] : null;
+ }
  if (videoFrame)
  {
+  videoFramesIdx++;
+
   const width = videoFrame.displayWidth;
   const height = videoFrame.displayHeight;
   canvas.width = width;
@@ -235,8 +255,6 @@ Raf()
   const commandBuffer = encoder.finish();
   device.queue.submit([commandBuffer]);
   // console.log("submitted frame");
-
-  // videoFrame.close();
  }
 
  requestAnimationFrame(Raf);
