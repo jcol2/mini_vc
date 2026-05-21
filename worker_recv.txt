@@ -3509,52 +3509,62 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
     await reader.cancel();
     reader.releaseLock();
   }
-  function DecoderCb(videoFrame) {
-    const width = videoFrame.displayWidth;
-    const height = videoFrame.displayHeight;
-    canvas.width = width;
-    canvas.height = height;
-    const fov = 90 * Math.PI / 180;
-    const aspect = width / height;
-    const zNear = 0;
-    const zFar = 2e3;
-    const projectionMatrix = mat4.perspective(fov, aspect, zNear, zFar);
-    const cameraPosition = [0, 0, 2];
-    const up = [0, 1, 0];
-    const target = [0, 0, 0];
-    const viewMatrix = mat4.lookAt(cameraPosition, target, up);
-    const viewProjectionMatrix = mat4.multiply(projectionMatrix, viewMatrix);
-    renderPassDescriptor.colorAttachments[0].view = ctx.getCurrentTexture().createView();
-    const encoder = device.createCommandEncoder();
-    const pass = encoder.beginRenderPass(renderPassDescriptor);
-    pass.setPipeline(pipeline);
-    const texture = device.importExternalTexture({ source: videoFrame });
-    const bindGroup = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: sampler },
-        { binding: 1, resource: texture },
-        { binding: 2, resource: uniBuf }
-      ]
-    });
-    const xSpacing = 0;
-    const ySpacing = 0;
-    const zDepth = -3;
-    const x = -0.5;
-    const y = 1;
-    mat4.translate(viewProjectionMatrix, [x * xSpacing, y * ySpacing, -zDepth * 0.5], matrix);
-    mat4.scale(matrix, [-aspect, -1, 1], matrix);
-    mat4.translate(matrix, [-0.5, -0.5, 0], matrix);
-    device.queue.writeBuffer(uniBuf, 0, uniVals);
-    pass.setBindGroup(0, bindGroup);
-    pass.draw(4);
-    pass.end();
-    const commandBuffer = encoder.finish();
-    device.queue.submit([commandBuffer]);
-    videoFrame.close();
+  var videoFrame = null;
+  function DecoderCb(v) {
+    if (videoFrame) {
+      videoFrame.close();
+    }
+    videoFrame = v.clone();
+    v.close();
   }
   function DecoderErrCb(err) {
     console.error(err);
+  }
+  function Raf() {
+    if (videoFrame) {
+      const width = videoFrame.displayWidth;
+      const height = videoFrame.displayHeight;
+      canvas.width = width;
+      canvas.height = height;
+      const fov = 90 * Math.PI / 180;
+      const aspect = width / height;
+      const zNear = 0;
+      const zFar = 2e3;
+      const projectionMatrix = mat4.perspective(fov, aspect, zNear, zFar);
+      const cameraPosition = [0, 0, 2];
+      const up = [0, 1, 0];
+      const target = [0, 0, 0];
+      const viewMatrix = mat4.lookAt(cameraPosition, target, up);
+      const viewProjectionMatrix = mat4.multiply(projectionMatrix, viewMatrix);
+      renderPassDescriptor.colorAttachments[0].view = ctx.getCurrentTexture().createView();
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginRenderPass(renderPassDescriptor);
+      pass.setPipeline(pipeline);
+      const texture = device.importExternalTexture({ source: videoFrame });
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: sampler },
+          { binding: 1, resource: texture },
+          { binding: 2, resource: uniBuf }
+        ]
+      });
+      const xSpacing = 0;
+      const ySpacing = 0;
+      const zDepth = -3;
+      const x = -0.5;
+      const y = 1;
+      mat4.translate(viewProjectionMatrix, [x * xSpacing, y * ySpacing, -zDepth * 0.5], matrix);
+      mat4.scale(matrix, [-aspect, -1, 1], matrix);
+      mat4.translate(matrix, [-0.5, -0.5, 0], matrix);
+      device.queue.writeBuffer(uniBuf, 0, uniVals);
+      pass.setBindGroup(0, bindGroup);
+      pass.draw(4);
+      pass.end();
+      const commandBuffer = encoder.finish();
+      device.queue.submit([commandBuffer]);
+    }
+    requestAnimationFrame(Raf);
   }
   async function WorkerMsgCb(msg) {
     canvas = msg.data.canvas;
@@ -3682,6 +3692,7 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
       // codedHeight: 720,
       // codedWidth: 1280,
     });
+    requestAnimationFrame(Raf);
     wt = await WebTransportAlloc("8142935cf816ade736327aab0b8de1f7c00292a8abac2c1dd9c450bd3a92c8cf");
     let unidiStrmReader = wt.incomingUnidirectionalStreams.getReader();
     for (; ; ) {

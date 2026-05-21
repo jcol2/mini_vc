@@ -156,73 +156,90 @@ UnidiCb(stream: ReadableStream)
  reader.releaseLock();
 }
 
+let videoFrame: null | VideoFrame = null;
 function
-DecoderCb(videoFrame: VideoFrame)
+DecoderCb(v: VideoFrame)
 {
- const width = videoFrame.displayWidth;
- const height = videoFrame.displayHeight;
- canvas.width = width;
- canvas.height = height;
-
- const fov = 90 * Math.PI / 180;  // 60 degrees in radians
- const aspect = width / height;
- const zNear  = 0;
- const zFar   = 2000;
- const projectionMatrix = mat4.perspective(fov, aspect, zNear, zFar);
-
- const cameraPosition = [0, 0, 2];
- const up = [0, 1, 0];
- const target = [0, 0, 0];
- const viewMatrix = mat4.lookAt(cameraPosition, target, up);
- const viewProjectionMatrix = mat4.multiply(projectionMatrix, viewMatrix);
-
- // Get the current texture from the canvas context and
- // set it as the texture to render to.
- renderPassDescriptor.colorAttachments[0]!.view =
-     ctx.getCurrentTexture().createView();
- const encoder = device.createCommandEncoder();
- const pass = encoder.beginRenderPass(renderPassDescriptor);
- pass.setPipeline(pipeline);
- const texture = device.importExternalTexture({source: videoFrame});
-
- const bindGroup = device.createBindGroup({
-  layout: pipeline.getBindGroupLayout(0),
-  entries: [
-   { binding: 0, resource: sampler },
-   { binding: 1, resource: texture },
-   { binding: 2, resource: uniBuf },
-  ],
- });
-
- const xSpacing = 0.0;
- const ySpacing = 0.0;
- const zDepth = -3.0;
-
- const x = -.5;
- const y = 1;
-
- mat4.translate(viewProjectionMatrix, [x * xSpacing, y * ySpacing, -zDepth * 0.5], matrix);
- // mat4.rotateX(matrix, 0.25 * Math.PI * Math.sign(y), matrix);
- mat4.scale(matrix, [-aspect, -1, 1], matrix);
- mat4.translate(matrix, [-0.5, -0.5, 0], matrix);
-
- // copy the values from JavaScript to the GPU
- device.queue.writeBuffer(uniBuf, 0, uniVals);
-
- pass.setBindGroup(0, bindGroup);
- pass.draw(4);
- pass.end();
- const commandBuffer = encoder.finish();
- device.queue.submit([commandBuffer]);
- // console.log("submitted frame");
-
- videoFrame.close();
+ if (videoFrame)
+ {
+  videoFrame.close();
+ }
+ videoFrame = v.clone();
+ v.close();
 }
 
 function
 DecoderErrCb(err: Error)
 {
  console.error(err);
+}
+
+function
+Raf()
+{
+ if (videoFrame)
+ {
+  const width = videoFrame.displayWidth;
+  const height = videoFrame.displayHeight;
+  canvas.width = width;
+  canvas.height = height;
+
+  const fov = 90 * Math.PI / 180;  // 60 degrees in radians
+  const aspect = width / height;
+  const zNear  = 0;
+  const zFar   = 2000;
+  const projectionMatrix = mat4.perspective(fov, aspect, zNear, zFar);
+
+  const cameraPosition = [0, 0, 2];
+  const up = [0, 1, 0];
+  const target = [0, 0, 0];
+  const viewMatrix = mat4.lookAt(cameraPosition, target, up);
+  const viewProjectionMatrix = mat4.multiply(projectionMatrix, viewMatrix);
+
+  // Get the current texture from the canvas context and
+  // set it as the texture to render to.
+  renderPassDescriptor.colorAttachments[0]!.view =
+      ctx.getCurrentTexture().createView();
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginRenderPass(renderPassDescriptor);
+  pass.setPipeline(pipeline);
+  const texture = device.importExternalTexture({source: videoFrame});
+
+  const bindGroup = device.createBindGroup({
+   layout: pipeline.getBindGroupLayout(0),
+   entries: [
+    { binding: 0, resource: sampler },
+    { binding: 1, resource: texture },
+    { binding: 2, resource: uniBuf },
+   ],
+  });
+
+  const xSpacing = 0.0;
+  const ySpacing = 0.0;
+  const zDepth = -3.0;
+
+  const x = -.5;
+  const y = 1;
+
+  mat4.translate(viewProjectionMatrix, [x * xSpacing, y * ySpacing, -zDepth * 0.5], matrix);
+  // mat4.rotateX(matrix, 0.25 * Math.PI * Math.sign(y), matrix);
+  mat4.scale(matrix, [-aspect, -1, 1], matrix);
+  mat4.translate(matrix, [-0.5, -0.5, 0], matrix);
+
+  // copy the values from JavaScript to the GPU
+  device.queue.writeBuffer(uniBuf, 0, uniVals);
+
+  pass.setBindGroup(0, bindGroup);
+  pass.draw(4);
+  pass.end();
+  const commandBuffer = encoder.finish();
+  device.queue.submit([commandBuffer]);
+  // console.log("submitted frame");
+
+  // videoFrame.close();
+ }
+
+ requestAnimationFrame(Raf);
 }
 
 async function
@@ -367,6 +384,11 @@ WorkerMsgCb(msg: {data: recv_worker_msg})
   // codedHeight: 720,
   // codedWidth: 1280,
  });
+
+
+ // render loop
+ requestAnimationFrame(Raf);
+
 
  wt = await WebTransportAlloc(certFingerprint);
  let unidiStrmReader = wt.incomingUnidirectionalStreams.getReader();
