@@ -1,4 +1,4 @@
-import { gopHeaderLn, GopHeaderWrite, sendOrderDefault, sendOrderKeyframe, frameHeaderLn, framesPerGop, WebTransportAlloc, FrameHeaderWrite } from "./util";
+import { gopHeaderLn, GopHeaderWrite, sendOrderDefault, sendOrderKeyframe, frameHeaderLn, framesPerGop, WebTransportAlloc, FrameHeaderWrite, PubHeaderWrite } from "./util";
 
 export interface vcap_worker_msg
 {
@@ -11,6 +11,7 @@ let encoder: VideoEncoder;
 let run = 1;
 let stream: WritableStream | null = null;
 
+let trackId = 0;
 let frameId = 0;
 async function
 EncoderCb(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): Promise<void>
@@ -35,7 +36,7 @@ EncoderCb(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): Promi
 
  if (isKey)
  {
-  writeOff = GopHeaderWrite(view, writeOff, frameId, 0, isKey); //todo proper trackid
+  writeOff = GopHeaderWrite(view, writeOff, frameId, trackId, isKey);
  }
  writeOff = FrameHeaderWrite(view, writeOff, chunk.byteLength, chunk.timestamp);
  chunk.copyTo(buf.subarray(writeOff));
@@ -71,6 +72,36 @@ async function
 WorkerMsgCb(msg: {data: vcap_worker_msg})
 {
  const reader = msg.data.readable.getReader();
+
+ // bidi resource publish request
+ {
+  const strm = await wt.createBidirectionalStream();
+  const writer = strm.writable.getWriter();
+  const buf = new Uint8Array(2);
+  const view = new DataView(buf.buffer);
+  PubHeaderWrite(view, 1);
+  await writer.write(view);
+  await writer.close();
+  writer.releaseLock();
+  const reader = strm.readable.getReader({mode: "byob"});
+  const tmpBuf = new Uint8Array(32);
+  const res = await reader.read(tmpBuf, {min: 2});
+  if (!res.done)
+  {
+   await reader.cancel();
+  }
+  const resBuf = res.value;
+  if (resBuf)
+  {
+   const resView = new DataView(resBuf.buffer);
+   const isOk = resView.getUint8(0);
+   run = isOk;
+   trackId = resView.getUint8(1);
+   console.log("[vcap] got trackId:", trackId);
+  }
+  reader.releaseLock();
+ }
+
  let frameCounter = 0;
  while (run)
  {
@@ -98,23 +129,6 @@ Main()
 {
  wt = await WebTransportAlloc(certFingerprint);
 
- // todo request to publish stream
- // {
- //  const buf = new Uint8Array(100);
- //  // chunk.copyTo(buf.subarray(headerLn));
- //  const view = new DataView(buf.buffer);
- //  // set req type
- //  view.setUint32(0, frameId, true);
-
- //  const thing = await wt.createBidirectionalStream({sendOrder: sendOrderAudio});
- //  const writer = thing.writable.getWriter();
- //  writer.write(buf);
- //  writer.releaseLock();
- //  const reader = thing.readable.getReader();
- //  const res = await reader.read();
- //  res.done;
- //  res.value;
- // }
 
 
 

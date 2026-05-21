@@ -1541,7 +1541,6 @@ WtBidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
    // Both directions of the stream have been shut down and MsQuic is done
    // with the stream. It can now be safely cleaned up.
    WtLogDebug("[strm][%p] All done\n", QStream);
-   MsQuic->StreamClose(QStream);
    break;
   }
   default:

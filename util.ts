@@ -14,6 +14,7 @@ export interface jitter_buf_el
  frameId: number,
  timestamp: number,
  metadata: number,
+ trackId: number,
 };
 export const metadataFlagIsKey = 0x1;
 
@@ -57,12 +58,13 @@ GopHeaderRead(v: DataView, jitterBuf: Array<jitter_buf_el>, jitterBufMask: numbe
 {
  const off = {off: 1};
  const frameId = DataViewReadU32(v, true, off) * framesPerGop;
- const trackId = DataViewReadU8(v, off); // todo track trackid
+ const trackId = DataViewReadU8(v, off);
  const metadata = DataViewReadU8(v, off);
 
  const jitterBufWriteIdx = frameId & jitterBufMask;
  const jitterBufEl = jitterBuf[jitterBufWriteIdx];
  // jitterBufEl.frameId = frameId;
+ jitterBufEl.trackId = trackId;
  jitterBufEl.metadata = metadata;
 
  console.assert(off.off === gopHeaderLn, "Error: GopHeaderRead incorrect read ln", off.off, gopHeaderLn);
@@ -102,11 +104,12 @@ FrameHeaderWrite(v: DataView, off: number, frameLn: number, timestampUs: number)
  return newOff;
 }
 
-// todo decide pub header shape
 export function
-PubHeaderWrite(v: DataView): void
+PubHeaderWrite(v: DataView, trackCnt: number): void
 {
- v.setUint8(0, headerPub);
+ let off = 0;
+ off = DataViewWriteU8(v, headerPub, off);
+ off = DataViewWriteU8(v, trackCnt, off);
 }
 
 export async function 

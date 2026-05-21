@@ -23,6 +23,7 @@
     const metadata = DataViewReadU8(v, off);
     const jitterBufWriteIdx = frameId & jitterBufMask2;
     const jitterBufEl = jitterBuf2[jitterBufWriteIdx];
+    jitterBufEl.trackId = trackId;
     jitterBufEl.metadata = metadata;
     console.assert(off.off === gopHeaderLn, "Error: GopHeaderRead incorrect read ln", off.off, gopHeaderLn);
     return jitterBufWriteIdx;
@@ -3416,7 +3417,7 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
   var renderPassDescriptor;
   var jitterBufLn = 256;
   var jitterBufMask = jitterBufLn - 1;
-  var jitterBuf = new Array(jitterBufLn).fill(null).map(() => ({ frame: null, timestamp: 0, frameId: 0, metadata: 0, frameLn: 0 }));
+  var jitterBuf = new Array(jitterBufLn).fill(null).map(() => ({ frame: null, timestamp: 0, frameId: 0, metadata: 0, frameLn: 0, trackId: 0 }));
   var jitterBufPlayIdx = 0;
   var jitterBufPlayIdxInit = 0;
   var jitterBufGotFirstFrame = 0;
@@ -3528,7 +3529,6 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
     let elapsed = now - lastFramePresentMs;
     let videoFrame = null;
     if (elapsed >= 33) {
-      console.log(elapsed);
       lastFramePresentMs = now;
       videoFrame = videoFrames.length ? videoFrames[videoFramesIdx] : null;
     }

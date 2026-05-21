@@ -2,6 +2,7 @@
 (() => {
   // util.ts
   var headerFrame = 0;
+  var headerPub = 1;
   var framesPerGop = 60;
   var gopHeaderLn = 7;
   var frameHeaderLn = 8;
@@ -13,11 +14,11 @@
     v.setUint32(off, n, le);
     return off + 4;
   }
-  function GopHeaderWrite(v, off, frameId2, trackId, metadata) {
+  function GopHeaderWrite(v, off, frameId2, trackId2, metadata) {
     let newOff = 0;
     newOff = DataViewWriteU8(v, headerFrame, newOff);
     newOff = DataViewWriteU32(v, frameId2, newOff, true);
-    newOff = DataViewWriteU8(v, trackId, newOff);
+    newOff = DataViewWriteU8(v, trackId2, newOff);
     newOff = DataViewWriteU8(v, metadata, newOff);
     console.assert(newOff - off === gopHeaderLn, "Error: GopHeaderWrite incorrect write ln", newOff, gopHeaderLn);
     return newOff;
@@ -28,6 +29,11 @@
     newOff = DataViewWriteU32(v, timestampUs, newOff, true);
     console.assert(newOff - off === frameHeaderLn, "Error: FrameHeaderWrite incorrect write ln", newOff, frameHeaderLn);
     return newOff;
+  }
+  function PubHeaderWrite(v, trackCnt) {
+    let off = 0;
+    off = DataViewWriteU8(v, headerPub, off);
+    off = DataViewWriteU8(v, trackCnt, off);
   }
   async function WebTransportAlloc(fingerprint) {
     const hashBytes = Uint8Array.fromHex(fingerprint);
@@ -3403,6 +3409,7 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
   var encoder;
   var run = 1;
   var stream = null;
+  var trackId = 0;
   var frameId = 0;
   async function EncoderCb(chunk, metadata) {
     const isKey = chunk.type == "key" ? 1 : 0;
@@ -3419,7 +3426,7 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
     const buf = new Uint8Array(bufLn);
     const view = new DataView(buf.buffer);
     if (isKey) {
-      writeOff = GopHeaderWrite(view, writeOff, frameId, 0, isKey);
+      writeOff = GopHeaderWrite(view, writeOff, frameId, trackId, isKey);
     }
     writeOff = FrameHeaderWrite(view, writeOff, chunk.byteLength, chunk.timestamp);
     chunk.copyTo(buf.subarray(writeOff));
@@ -3432,6 +3439,31 @@ registerProcessor('audio-capture-processor', AudioCaptureProcessor);
   }
   async function WorkerMsgCb(msg) {
     const reader = msg.data.readable.getReader();
+    {
+      const strm = await wt.createBidirectionalStream();
+      const writer = strm.writable.getWriter();
+      const buf = new Uint8Array(2);
+      const view = new DataView(buf.buffer);
+      PubHeaderWrite(view, 1);
+      await writer.write(view);
+      await writer.close();
+      writer.releaseLock();
+      const reader2 = strm.readable.getReader({ mode: "byob" });
+      const tmpBuf = new Uint8Array(32);
+      const res = await reader2.read(tmpBuf, { min: 2 });
+      if (!res.done) {
+        await reader2.cancel();
+      }
+      const resBuf = res.value;
+      if (resBuf) {
+        const resView = new DataView(resBuf.buffer);
+        const isOk = resView.getUint8(0);
+        run = isOk;
+        trackId = resView.getUint8(1);
+        console.log("[vcap] got trackId:", trackId);
+      }
+      reader2.releaseLock();
+    }
     let frameCounter = 0;
     while (run) {
       const { done, value } = await reader.read();

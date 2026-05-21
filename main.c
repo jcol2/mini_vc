@@ -12,7 +12,7 @@ enum
 typedef struct gop_header gop_header;
 struct gop_header
 {
- header_kind FrameType;
+ header_kind HeaderType;
  uint32_t FrameId;
  uint8_t TrackId;
  uint8_t Metadata;
@@ -23,7 +23,9 @@ struct gop_header
 typedef struct pub_header pub_header;
 struct pub_header
 {
- header_kind FrameType;
+ header_kind HeaderType;
+ // the number of resources to create
+ uint8_t PubCnt;
 };
 #pragma pack(pop)
 
@@ -31,19 +33,25 @@ struct pub_header
 typedef struct sub_header sub_header;
 struct sub_header
 {
- header_kind FrameType;
+ header_kind HeaderType;
  uint32_t Ln;
 };
 #pragma pack(pop)
 
 
-typedef struct gop_header_buf gop_header_buf;
-struct gop_header_buf
+enum
+{
+ HeaderBufCapacity = Max(Max(sizeof(gop_header), sizeof(pub_header)), sizeof(sub_header)),
+};
+typedef struct header_buf header_buf;
+struct header_buf
 {
  union
  {
-  uint8_t Mem[sizeof(gop_header)];
-  gop_header Header;
+  uint8_t Mem[HeaderBufCapacity];
+  gop_header GopHeader;
+  pub_header PubHeader;
+  sub_header SubHeader;
  };
  uint8_t Ln;
 };
@@ -94,7 +102,7 @@ struct my_stream
  uint32_t IsInStream;
  // outgoing streams are mapped to an incoming stream
  uint64_t OwningStreamId;
- gop_header_buf FrameHeader;
+ header_buf HeaderBuf;
 
  wt_stream Stream;
 
@@ -109,15 +117,50 @@ struct my_stream
  uint32_t SendLn;
 };
 
-#define FrameHeaderIsReady(U64Buf) ((U64Buf)->Ln == sizeof((U64Buf)->Mem))
+static uint32_t
+GopHeaderIsReady(header_buf *H)
+{
+ return H->Ln == sizeof(gop_header) && H->GopHeader.HeaderType == HeaderFrame;
+}
+static uint32_t
+PubHeaderIsReady(header_buf *H)
+{
+ return H->Ln == sizeof(pub_header) && H->GopHeader.HeaderType == HeaderPub;
+}
+static uint32_t
+SubHeaderIsReady(header_buf *H)
+{
+ return H->Ln == sizeof(sub_header) && H->GopHeader.HeaderType == HeaderSub;
+}
 
 // Getters needed for unaligned access
 static uint32_t
-FrameHeaderGetFrameId(gop_header_buf *Buf)
+GopHeaderGetFrameId(header_buf *Buf)
 {
  uint32_t Ret = 0;
- StaticAssert(ret_geq_frame_id, sizeof(Ret) >= sizeof(Buf->Header.FrameId));
- memcpy(&Ret, &Buf->Header.FrameId, sizeof(Buf->Header.FrameId));
+ StaticAssert(ret_geq_frame_id, sizeof(Ret) >= sizeof(Buf->GopHeader.FrameId));
+ memcpy(&Ret, &Buf->GopHeader.FrameId, sizeof(Buf->GopHeader.FrameId));
+ return Ret;
+}
+
+static uint32_t
+HeaderBufBuffer(QUIC_STREAM_EVENT *Event, header_buf *HeaderBuf, uint32_t HeaderSize)
+{
+ uint32_t Ret = 0;
+ for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
+ {
+  QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
+  uint8_t CpyLn = (uint8_t)Min(HeaderSize - HeaderBuf->Ln, Buf->Length);
+  memcpy(HeaderBuf->Mem + HeaderBuf->Ln, Buf->Buffer, CpyLn);
+  HeaderBuf->Ln += CpyLn;
+  Buf->Buffer += CpyLn;
+  Buf->Length -= CpyLn;
+  if (HeaderSize == HeaderBuf->Ln)
+  {
+   Ret = 1;
+   break;
+  }
+ }
  return Ret;
 }
 
@@ -324,7 +367,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   WtLogErr("[STRM] Error: Ctx missing in MyUnidiCb!\n");
   return QUIC_STATUS_SUCCESS;
  }
- gop_header_buf *FrameHeaderBuf = &MyStream->FrameHeader;
+ header_buf *GopHeaderBuf = &MyStream->HeaderBuf;
  QUIC_API_TABLE *MsQuic = MyStream->Stream.Con->Srv->MsQuic;
  WtUnidiCb(QStream, &MyStream->Stream, Event);
 
@@ -337,26 +380,14 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   {
 
    // buffer input
-   uint32_t WasReady = FrameHeaderIsReady(FrameHeaderBuf);
+   uint32_t WasReady = GopHeaderIsReady(GopHeaderBuf);
    if (!WasReady)
    {
-    for (size_t I = 0; I < Event->RECEIVE.BufferCount; ++I)
-    {
-     QUIC_BUFFER *Buf = (QUIC_BUFFER *)Event->RECEIVE.Buffers + I;
-     uint8_t CpyLn = (uint8_t)Min(sizeof(FrameHeaderBuf->Mem) - FrameHeaderBuf->Ln, Buf->Length);
-     memcpy(FrameHeaderBuf->Mem + FrameHeaderBuf->Ln, Buf->Buffer, CpyLn);
-     FrameHeaderBuf->Ln += CpyLn;
-     Buf->Buffer += CpyLn;
-     Buf->Length -= CpyLn;
-     if (FrameHeaderIsReady(FrameHeaderBuf))
-     {
-      break;
-     }
-    }
+    HeaderBufBuffer(Event, GopHeaderBuf, sizeof(gop_header));
    }
 
    // if stream has frame id, then fan out
-   uint32_t IsReady = FrameHeaderIsReady(FrameHeaderBuf);
+   uint32_t IsReady = GopHeaderIsReady(GopHeaderBuf);
    if (IsReady)
    {
     OsRwMutexTake(MyStream->MyCon->MySrv->RwMtx, 0);
@@ -371,11 +402,11 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
       for (my_stream *MyStreamNode = MyConNode->FirstOut; MyStreamNode; MyStreamNode = MyStreamNode->Next)
       {
        // cancel old streams
-       if (FrameHeaderGetFrameId(&MyStreamNode->FrameHeader) < (Max(FrameHeaderGetFrameId(FrameHeaderBuf), 6) - 6))
+       if (GopHeaderGetFrameId(&MyStreamNode->HeaderBuf) < (Max(GopHeaderGetFrameId(GopHeaderBuf), 6) - 6))
        {
         StreamSendShutdown(MsQuic, &MyStreamNode->Stream, H3ErrNoError);
        }
-       else if (FrameHeaderIsReady(&MyStreamNode->FrameHeader) && MyStreamNode->OwningStreamId == MyStream->Stream.Id)
+       else if (GopHeaderIsReady(&MyStreamNode->HeaderBuf) && MyStreamNode->OwningStreamId == MyStream->Stream.Id)
        {
         OutStream = MyStreamNode;
         OutStreamLn++;
@@ -402,7 +433,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
        // create out stream
        WtLogDebug("[STRM][%p][%zd] Creating stream\n", QStream, MyStream->Stream.Id);
        OutStream = MyOutStreamPush(MyConNode);
-       OutStream->FrameHeader = *FrameHeaderBuf;
+       OutStream->HeaderBuf = *GopHeaderBuf;
        OutStream->OwningStreamId = MyStream->Stream.Id;
 
        // send the frame id
@@ -417,7 +448,7 @@ MyUnidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
         A8WriteVarInt(&UnidiWriter, SessionId);
 
         MyStreamSendChunk(MsQuic, OutStream, UnidiHeader.Mem, UnidiHeader.Ln - UnidiWriter.Ln, QUIC_SEND_FLAG_START | QUIC_SEND_FLAG_DELAY_SEND);
-        MyStreamSendChunk(MsQuic, OutStream, FrameHeaderBuf->Mem, FrameHeaderBuf->Ln, QUIC_SEND_FLAG_DELAY_SEND);
+        MyStreamSendChunk(MsQuic, OutStream, GopHeaderBuf->Mem, GopHeaderBuf->Ln, QUIC_SEND_FLAG_DELAY_SEND);
        }
        else
        {
@@ -539,6 +570,28 @@ MyBidiCb(HQUIC QStream, void *Ctx, QUIC_STREAM_EVENT *Event)
   uint32_t CloseQStream = !Event->SHUTDOWN_COMPLETE.AppCloseInProgress && !Event->SHUTDOWN_COMPLETE.ConnectionShutdown;
   MyStreamFree(MsQuic, MyStream, CloseQStream);
  }
+ else if (Event->Type == QUIC_STREAM_EVENT_RECEIVE)
+ {
+  QUIC_BUFFER *Buffers = (QUIC_BUFFER *)Event->RECEIVE.Buffers;
+  uint32_t BuffersLn = Event->RECEIVE.BufferCount;
+  header_buf *HeaderBuf = &MyStream->HeaderBuf;
+  uint64_t StreamType = MyStream->Stream.StreamHeader.Val1;
+  if (StreamType == H3StreamBidiWebtransportStream)
+  {
+   uint32_t WasReady = PubHeaderIsReady(HeaderBuf);
+   if (!WasReady)
+   {
+    HeaderBufBuffer(Event, HeaderBuf, sizeof(pub_header));
+    if (PubHeaderIsReady(HeaderBuf))
+    {
+     WtLogDebug("[STRM][%p][%zd][%d] Bidi recv pub create req\n", QStream, MyStream->Stream.Id, GetCurrentThreadId());
+     char Mem[2] = {1, 123};
+     MyStreamSendChunk(MsQuic, MyStream, Mem, sizeof(Mem), QUIC_SEND_FLAG_FIN);
+    }
+   }
+  }
+ }
+
  return QUIC_STATUS_SUCCESS;
 }
 

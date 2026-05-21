@@ -22,7 +22,7 @@ let renderPassDescriptor: GPURenderPassDescriptor;
 
 export const jitterBufLn = 256;
 export const jitterBufMask = jitterBufLn - 1;
-export const jitterBuf: Array<jitter_buf_el> = new Array(jitterBufLn).fill(null).map(() => ({ frame: null, timestamp: 0, frameId: 0, metadata: 0, frameLn: 0}));
+export const jitterBuf: Array<jitter_buf_el> = new Array(jitterBufLn).fill(null).map(() => ({ frame: null, timestamp: 0, frameId: 0, metadata: 0, frameLn: 0, trackId: 0}));
 let jitterBufPlayIdx = 0;
 let jitterBufPlayIdxInit = 0;
 let jitterBufGotFirstFrame = 0;
@@ -191,7 +191,6 @@ Raf()
  // todo update this to negotiated fps later
  if (elapsed >= 33)
  {
-  console.log(elapsed);
   lastFramePresentMs = now;
   videoFrame = videoFrames.length ? videoFrames[videoFramesIdx] : null;
  }
@@ -433,6 +432,7 @@ WorkerMsgCb(msg: {data: recv_worker_msg})
   }
 
   // on ff its a WebTransportReceiveStream
+  // on chrome its a readablestream
   const stream: ReadableStream = res.value;
   UnidiCb(stream);
  }
